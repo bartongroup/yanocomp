@@ -1,4 +1,5 @@
 import os
+import logging
 from functools import partial
 import multiprocessing as mp
 
@@ -11,6 +12,8 @@ import pomegranate as pm
 
 import click
 
+
+logger = logging.getLogger('gmmtest')
 
 RESULTS_COLUMNS = [
     'chrom', 'pos', 'gene_id', 'strand',
@@ -29,7 +32,7 @@ def get_model(model_fn=None):
     '''
     if model_fn is None:
         model_fn = os.path.join(
-            od.path.split(os.path.abspath(__file__))[0],
+            os.path.split(os.path.abspath(__file__))[0],
             'data/r9.4_70bps.u_to_t_rna.5mer.template.model'
         )
     m = pd.read_csv(
@@ -319,6 +322,7 @@ def parallel_test(cntrl_fns, treat_fns,
         gene_ids = get_expressed_genes(cntrl_h5 + treat_h5)
         gene_id_chunks = np.array_split(gene_ids, processes)
 
+    logger.info(f'{len(gene_ids):,} genes to be processed on {processes} workers')
     with mp.Pool(processes) as pool:
         _test_chunk = partial(
             test_chunk,
@@ -333,6 +337,7 @@ def parallel_test(cntrl_fns, treat_fns,
         for chunk_res in pool.imap_unordered(_test_chunk, gene_id_chunks):
             res += chunk_res
 
+    logger.info(f'Complete. Tested {len(res):,} positions')
     res = pd.DataFrame(res, columns=RESULTS_COLUMNS)
     _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
     return res
@@ -343,7 +348,11 @@ def to_bed(res, output_bed_fn, fdr_threshold=0.05):
     write main results to bed file
     '''
     sig_res = res.query(f'fdr < {fdr_threshold}')
+    logger.info(
+        f'{len(sig_res):,} positions significant at {fdr_threshold * 100:.0f}% level'
+    )
     sig_res = sig_res.sort_values(by=['chrom', 'pos'])
+    logger.info(f'Writing output to {os.path.abspath(output_bed_fn)}')
     with open(output_bed_fn, 'w') as bed:
         for record in sig_res.itertuples(index=False):
             (chrom, pos, gene_id, strand,
@@ -363,7 +372,7 @@ def to_bed(res, output_bed_fn, fdr_threshold=0.05):
 @click.command()
 @click.option('-c', '--cntrl-hdf5-fns', required=True, multiple=True)
 @click.option('-t', '--treat-hdf5-fns', required=True, multiple=True)
-@click.option('-b', '--output-bed-fn', required=True)
+@click.option('-o', '--output-bed-fn', required=True)
 @click.option('-n', '--min-depth', required=False, default=10)
 @click.option('-m', '--max-gmm-fit-depth', required=False, default=1000)
 @click.option('-k', '--min-kl-divergence', required=False, default=0.5)
@@ -376,6 +385,10 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn,
     '''
     Differential RNA modifications using nanopore DRS signal level data
     '''
+    logger.info(
+        f'Running gmmtest with {len(cntrl_hdf5_fns):,} control '
+        f'datasets and {len(treat_hdf5_fns):,} treatment datasets'
+    )
     res = parallel_test(
         cntrl_hdf5_fns, treat_hdf5_fns,
         min_depth, max_gmm_fit_depth,
@@ -386,4 +399,4 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn,
 
 
 if __name__ == '__main__':
-    gmmtest()
+    gmm_test()

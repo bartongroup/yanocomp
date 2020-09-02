@@ -3,6 +3,7 @@ import sys
 import re
 import csv
 import gzip
+import logging
 import itertools as it
 from operator import itemgetter
 from bisect import bisect_right
@@ -14,6 +15,7 @@ import numpy as np
 import h5py as h5
 import click
 
+logger = logging.getLogger('prep')
 
 EVENT_DTYPE = np.dtype([
     ('transcript_idx', np.uint8),
@@ -255,9 +257,12 @@ def parallel_collapse(ea_fn, gtf_fn, processes, chunksize):
     collapses the records from the eventalign file
     '''
     if gtf_fn is not None:
+        logger.info(f'Loading GTF records from {os.path.abspath(gtf_fn)}')
         gtf = load_gtf(gtf_fn, mapped_to='transcript_id', parent_id='gene_id')
         to_gene = True
+        logger.info(f'{len(gtf):,} transcript records loaded from GTF')
     else:
+        logger.info(f'No GTF provided, records will be grouped by transcript')
         gtf = None
         to_gene = False
     with EventalignDictReader(ea_fn) as ea, mp.Pool(processes) as pool:
@@ -353,6 +358,9 @@ def to_hdf5(collapsed, hdf5_fn):
 @click.option('-p', '--processes', required=False, default=1)
 @click.option('-n', '--chunksize', required=False, default=1_000_000)
 def nanopolish_collapse(eventalign_fn, hdf5_fn, gtf_fn, processes, chunksize):
+    '''
+    Parse nanopolish eventalign tabular data into a more managable HDF5 format...
+    '''
     to_hdf5(
         parallel_collapse(eventalign_fn, gtf_fn, processes, chunksize),
         hdf5_fn
