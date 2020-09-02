@@ -15,4 +15,5 @@
 
 * option to test at transcript level rather than gene level
 * consider adding dwell time to GMM.
+* output the single molecule predictions?
 * documentation...

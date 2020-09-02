@@ -21,6 +21,12 @@ RESULTS_COLUMNS = [
 
 
 def get_model(model_fn=None):
+    '''
+    Load the parameters for the expected kmer distributions.
+    File is a tsv with at least columns "kmer", "level_mean", "level_stdv"
+    Default is taken from nanopolish:
+    https://github.com/jts/nanopolish/blob/master/etc/r9-models/r9.4_70bps.u_to_t_rna.5mer.template.model
+    '''
     if model_fn is None:
         model_fn = os.path.join(
             od.path.split(os.path.abspath(__file__))[0],
@@ -33,6 +39,10 @@ def get_model(model_fn=None):
 
 
 class HDF5List:
+    
+    '''
+    boilerplate to have several HDF5 files as single context manager
+    '''
 
     def __init__(self, hdf5_fns):
         self._hdf5_list = [
@@ -57,6 +67,9 @@ class HDF5List:
 
 
 def get_expressed_genes(datasets):
+    '''
+    Identify the genes which have eventaligned reads in all samples
+    '''
     # filter out any transcripts that are not expressed in all samples
     genes = set(datasets[0].keys())
     for d in datasets[1:]:
@@ -67,6 +80,10 @@ def get_expressed_genes(datasets):
 def fetch_gene_events(gene_id, datasets,
                       fetch_transcript_ids=False,
                       fetch_read_ids=False):
+    '''
+    Extract the event alignment table for a given gene from a
+    list of HDF5 file objects
+    '''
     gene_events = []
     for i, d in enumerate(datasets, 1):
         # read full dataset from disk
@@ -85,6 +102,10 @@ def fetch_gene_events(gene_id, datasets,
 
 
 def fetch_gene_attrs(gene_id, datasets):
+    '''
+    Extracts important info i.e. chromosome, strand and kmers
+    for a gene from the HDF5 files...
+    '''
     kmers = {}
     # get general info which should be same for all datasets
     g = datasets[0][gene_id]
@@ -101,6 +122,10 @@ def fetch_gene_attrs(gene_id, datasets):
 
 def iter_positions(gene_id, cntrl_datasets, treat_datasets,
                    min_depth=10):
+    '''
+    Generator which iterates over the positions in a gene
+    which have the minimum depth in eventaligned reads.
+    '''
     cntrl_events = fetch_gene_events(gene_id, cntrl_datasets)
     treat_events = fetch_gene_events(gene_id, treat_datasets)
     kmers, chrom, strand = fetch_gene_attrs(
@@ -120,6 +145,9 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
 
 
 def kl_divergence(X_mu, X_sigma, Y_mu, Y_sigma):
+    '''
+    measure of divergence between two distributions
+    '''
     X_var, Y_var = X_sigma ** 2, Y_sigma ** 2
     lsr = np.log(Y_sigma / X_sigma)
     sdm = (X_mu - Y_mu) ** 2
@@ -127,12 +155,16 @@ def kl_divergence(X_mu, X_sigma, Y_mu, Y_sigma):
 
 
 def fit_gmm(cntrl_means, treat_means, expected_params, max_gmm_fit_depth=1000):
+    '''
+    Fits a two-gaussian GMM to pooled data and measures KL divergence of
+    the resulting distributions.
+    '''
     pooled = np.concatenate([cntrl_means, treat_means])
     if len(pooled) > max_gmm_fit_depth:
         np.random.shuffle(pooled)
         pooled = pooled[:max_gmm_fit_depth]
-    # Model starts as two identical Normal distributions initialised from
-    # the expected parameters. The first cannot be fit.
+    # Model starts as two identical normal distributions initialised from
+    # the expected parameters. The first is frozen (i.e. cannot be fit).
     gmm = pm.GeneralMixtureModel(
         [
             pm.NormalDistribution(*expected_params, frozen=True),
@@ -148,6 +180,9 @@ def fit_gmm(cntrl_means, treat_means, expected_params, max_gmm_fit_depth=1000):
 
 
 def gmm_predictions(gmm, means):
+    '''
+    Use the GMM to make single molecule predictions and calculate fraction modified.
+    '''
     probs = gmm.predict_proba(means.reshape(-1, 1))
     preds = probs.argmax(1)
     log_prob = np.log2(probs.sum(0))
@@ -157,6 +192,9 @@ def gmm_predictions(gmm, means):
 
 
 def crosstab_preds_per_replicate(preds, replicates):
+    '''
+    Makes contingency table of replicates vs predictions
+    '''
     # make categorical to catch cases where 100% of preds are one class
     preds = pd.Categorical(preds, categories=[0, 1])
     ct = pd.crosstab(replicates, preds, dropna=False).values
@@ -164,6 +202,9 @@ def crosstab_preds_per_replicate(preds, replicates):
 
 
 def two_cond_g_test(counts):
+    '''
+    G test, catch errors caused by rows/columns with all zeros
+    '''
     try:
         g_stat, p_val, *_ = stats.chi2_contingency(
             counts, lambda_='log-likelihood'
@@ -177,6 +218,9 @@ def two_cond_g_test(counts):
 def gmm_g_test(cntrl_preds, cntrl_reps,
                treat_preds, treat_reps,
                p_val_threshold=0.05):
+    '''
+    Perform G tests for differential modification and within-condition homogeneity
+    '''
     cntrl_counts = crosstab_preds_per_replicate(cntrl_preds, cntrl_reps)
     treat_counts = crosstab_preds_per_replicate(treat_preds, treat_reps)
     het_g, p_val = two_cond_g_test([
@@ -198,6 +242,9 @@ def position_stats(cntrl, treat, kmer,
                    min_kld=0.5,
                    p_val_threshold=0.05,
                    model=get_model()):
+    '''
+    Fits the GMM, estimates mod rates/changes, and performs G test
+    '''
     # first test that there is actually some difference in cntrl/treat
     pass_ttest = False
     pass_kld = False
@@ -241,6 +288,9 @@ def position_stats(cntrl, treat, kmer,
 def test_chunk(gene_ids, cntrl_fns, treat_fns,
                min_depth=10, max_gmm_fit_depth=1000,
                min_kld=0.5, p_val_threshold=0.05):
+    '''
+    run the GMM tests on a subset of gene_ids
+    '''
     chunk_res = []
     with HDF5List(cntrl_fns) as cntrl_h5, HDF5List(treat_fns) as treat_h5:
         for gene_id in gene_ids:
@@ -261,7 +311,10 @@ def parallel_test(cntrl_fns, treat_fns,
                   min_depth=10, max_gmm_fit_depth=1000,
                   min_kld=0.5, p_val_threshold=0.05,
                   processes=1):
-
+    '''
+    Runs the GMM tests on positions from gene_ids which are found in all HDF5.
+    Gene ids are processed as parallel chunks.
+    '''
     with HDF5List(cntrl_fns) as cntrl_h5, HDF5List(treat_fns) as treat_h5:
         gene_ids = get_expressed_genes(cntrl_h5 + treat_h5)
         gene_id_chunks = np.array_split(gene_ids, processes)
@@ -286,6 +339,9 @@ def parallel_test(cntrl_fns, treat_fns,
 
 
 def to_bed(res, output_bed_fn, fdr_threshold=0.05):
+    '''
+    write main results to bed file
+    '''
     sig_res = res.query(f'fdr < {fdr_threshold}')
     sig_res = sig_res.sort_values(by=['chrom', 'pos'])
     with open(output_bed_fn, 'w') as bed:
@@ -317,6 +373,9 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn,
              min_depth, max_gmm_fit_depth,
              min_kl_divergence, fdr_threshold,
              processes):
+    '''
+    Differential RNA modifications using nanopore DRS signal level data
+    '''
     res = parallel_test(
         cntrl_hdf5_fns, treat_hdf5_fns,
         min_depth, max_gmm_fit_depth,
