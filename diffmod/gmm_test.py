@@ -352,7 +352,7 @@ def parallel_test(cntrl_fns, treat_fns, model_fn=None,
     Gene ids are processed as parallel chunks.
     '''
     with hdf5_list(cntrl_fns) as cntrl_h5, hdf5_list(treat_fns) as treat_h5:
-        gene_ids = sorted(get_expressed_genes(cntrl_h5 + treat_h5))[:120]
+        gene_ids = sorted(get_expressed_genes(cntrl_h5 + treat_h5))
         gene_id_chunks = np.array_split(gene_ids, processes)
 
     logger.info(f'{len(gene_ids):,} genes to be processed on {processes} workers')
