@@ -19,10 +19,12 @@ setup(
     install_requires=[
         'numpy',
         'scipy',
-        'pandas',
-        'click',
+        'pandas>=1.1',
         'statsmodels',
         'pomegranate>=0.13.3',
-        'h5py=2.10.0'
+        'scikit-learn',
+        'h5py=2.10.0',
+        'click',
+        'click_log',
     ],
 )

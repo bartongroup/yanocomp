@@ -5,6 +5,7 @@ import click_log
 
 from .nanopolish_collapse import nanopolish_collapse
 from .gmm_test import gmm_test
+from .model_kmers import model_priors
 
 
 def get_logger(name):
@@ -22,6 +23,7 @@ def get_logger(name):
 
 COMMANDS = {
     'prep': get_logger('prep')(nanopolish_collapse),
+    'priors': get_logger('priors')(model_priors),
     'gmmtest': get_logger('gmmtest')(gmm_test),
 }
 
