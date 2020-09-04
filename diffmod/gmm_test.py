@@ -6,7 +6,6 @@ import multiprocessing as mp
 
 import numpy as np
 import pandas as pd
-from pandas.core.computation.ops import UndefinedVariableError
 from scipy import stats
 from statsmodels.stats.multitest import multipletests
 import h5py as h5
@@ -396,10 +395,10 @@ def to_bed(res, output_bed_fn, fdr_threshold=0.05, custom_filter=None):
             (chrom, pos, gene_id, kmer, strand,
              log_odds, pval, fdr, c_fm, t_fm,
              g_stat, hom_g_stat, kld) = record
-            nlogfdr = - int(round(np.log10(fdr)))
+            score = - int(round(min(np.log10(fdr), 1000)))
             bed_record = (
                 f'{chrom:s}\t{pos - 2:d}\t{pos + 3:d}\t'
-                f'{gene_id}:{kmer}\t{nlogfdr:d}\t{strand:s}\t'
+                f'{gene_id}:{kmer}\t{score:d}\t{strand:s}\t'
                 f'{log_odds:.2f}\t{pval:.2g}\t{fdr:.2g}\t'
                 f'{c_fm:.2f}\t{t_fm:.2f}\t'
                 f'{g_stat:.2f}\t{hom_g_stat:.2f}\t{kld:.2f}\n'
@@ -413,14 +412,14 @@ def to_bed(res, output_bed_fn, fdr_threshold=0.05, custom_filter=None):
 @click.option('-o', '--output-bed-fn', required=True)
 @click.option('-m', '--prior-model-fn', required=False, default=None)
 @click.option('-n', '--min-depth', required=False, default=10)
-@click.option('-m', '--max-gmm-fit-depth', required=False, default=10_000)
+@click.option('-d', '--max-gmm-fit-depth', required=False, default=10_000)
 @click.option('-b', '--class-balance-method', required=False,
               type=click.Choice(['none', 'undersample', 'oversample']), default='none')
 @click.option('-k', '--min-kl-divergence', required=False, default=0.5)
 @click.option('-f', '--fdr-threshold', required=False, default=0.05)
 @click.option('--custom-filter', required=False, default=None)
 @click.option('-p', '--processes', required=False, default=1)
-def gmm_test(cntrl_hdf5_fns, treat_hdf5_fn, output_bed_fn, prior_model_fn,
+def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
              min_depth, max_gmm_fit_depth, class_balance_method,
              min_kl_divergence, fdr_threshold,
              custom_filter, processes):

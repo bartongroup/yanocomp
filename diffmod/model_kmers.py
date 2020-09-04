@@ -1,3 +1,4 @@
+import logging
 import random
 import itertools as it
 from functools import partial
@@ -6,11 +7,16 @@ import multiprocessing as mp
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 from sklearn.cluster import DBSCAN
 import pomegranate as pm
 import h5py as h5
 
 import click
+
+
+logger = logging.getLogger('gmmtest')
+
 
 MODEL_COLUMNS = [
     'kmer',
@@ -150,8 +156,8 @@ def calculcate_model_priors(hdf5_fns,
             max_events_per_pos,
             max_events_per_kmer
         )
-        kmers_clean = remove_outliers(kmers, pool)
-    model = fit_models(kmers_clean)
+        kmer_events = remove_outliers(kmer_events, pool)
+    model = fit_models(kmer_events)
     return model
 
 
@@ -166,14 +172,14 @@ def calculcate_model_priors(hdf5_fns,
 @click.option('-p', '--processes', required=False, default=1)
 def model_priors(hdf5_fns, model_output_fn,
                  n_genes_sampled, max_events_sampled_per_pos,
-                 events_sampled_per_pos,
+                 events_sampled_per_kmer,
                  dbscan_eps, dbscan_min_frac,
                  processes):
     model = calculcate_model_priors(
         hdf5_fns,
         n_genes=n_genes_sampled,
         max_events_per_pos=max_events_sampled_per_pos,
-        max_events_per_kmer=events_sampled_per_pos,
+        max_events_per_kmer=events_sampled_per_kmer,
         dbscan_eps=dbscan_eps,
         dbscan_min_frac=dbscan_min_frac,
         processes=processes
