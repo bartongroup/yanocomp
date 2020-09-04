@@ -1,11 +1,10 @@
-from functools import wraps
 import logging
 import click
 import click_log
 
-from .nanopolish_collapse import nanopolish_collapse
-from .gmm_test import gmm_test
-from .model_kmers import model_priors
+from .prep import nanopolish_collapse
+from .priors import model_priors
+from .gmmtest import gmm_test
 
 
 def get_logger(name):
@@ -21,10 +20,12 @@ def get_logger(name):
     return log_opt
 
 
+log_opt = get_logger('diffmod')
+
 COMMANDS = {
-    'prep': get_logger('prep')(nanopolish_collapse),
-    'priors': get_logger('priors')(model_priors),
-    'gmmtest': get_logger('gmmtest')(gmm_test),
+    'prep': log_opt(nanopolish_collapse),
+    'priors': log_opt(model_priors),
+    'gmmtest': log_opt(gmm_test),
 }
 
 
@@ -33,6 +34,5 @@ def cli():
     pass
 
 
-
-if __name__ == '__main__':    
+if __name__ == '__main__':
     cli()
