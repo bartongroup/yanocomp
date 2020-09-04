@@ -97,6 +97,15 @@ def collapse_chunk(ea_chunk, to_gene=False):
     return collapsed, gene_info
 
 
+def get_gtf_chunk(chunk_transcript_ids, gtf):
+    try:
+        gtf_chunk = {t_id: gtf[t_id] for t_id in chunk_transcript_ids}
+    except TypeError:
+        # gtf is None
+        gtf_chunk = None
+    return gtf_chunk
+
+
 def get_chunks(ea, approx_chunksize, gtf=None):
     '''
     chunks eventalign records. all records from the same read should be
@@ -109,7 +118,7 @@ def get_chunks(ea, approx_chunksize, gtf=None):
         read_id = record['r_id']
         transcript_id = record['t_id']
         if read_id != curr_read_id and len(ea_chunk) >= approx_chunksize:
-            gtf_chunk = {t_id: gtf[t_id] for t_id in chunk_transcript_ids}
+            gtf_chunk = get_gtf_chunk(chunk_transcript_ids, gtf)
             yield ea_chunk, gtf_chunk
             ea_chunk = []
             chunk_transcript_ids = set()
@@ -117,7 +126,7 @@ def get_chunks(ea, approx_chunksize, gtf=None):
         ea_chunk.append(record)
         chunk_transcript_ids.add(transcript_id)
     else:
-        gtf_chunk = {t_id: gtf[t_id] for t_id in chunk_transcript_ids}
+        gtf_chunk = get_gtf_chunk(chunk_transcript_ids, gtf)
         yield ea_chunk, gtf_chunk
 
 
@@ -139,8 +148,8 @@ def parallel_collapse(ea_fn, gtf_fn, processes, chunksize):
 
     ea_chunker = get_chunks(parse_eventalign(ea_fn), chunksize, gtf)
     with mp.Pool(processes) as pool:
-        collapse = partial(collapse_chunk, to_gene=to_gene)
-        for chunk, gene_info in pool.imap_unordered(collapse, ea_chunker):
+        _collapse_func = partial(collapse_chunk, to_gene=to_gene)
+        for chunk, gene_info in pool.imap_unordered(_collapse_func, ea_chunker):
             # group by gene
             for gene_id, records in it.groupby(chunk, itemgetter(0)):
                 chrom, strand = gene_info[gene_id]
