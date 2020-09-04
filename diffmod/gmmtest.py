@@ -18,13 +18,6 @@ from .io import (
 
 logger = logging.getLogger('diffmod')
 
-RESULTS_COLUMNS = [
-    'chrom', 'pos', 'gene_id', 'kmer', 'strand',
-    'log_odds', 'p_val', 'fdr',
-    'cntrl_frac_mod', 'treat_frac_mod',
-    'g_stat', 'hom_g_stat', 'kl_divergence',
-]
-
 
 def kl_divergence(X_mu, X_sigma, Y_mu, Y_sigma):
     '''
@@ -57,8 +50,14 @@ def correct_class_imbalance(cntrl, treat, max_depth, method=None):
     return cntrl, treat
 
 
+def remove_outliers(gmm, X, quantile=0.99):
+    prob = gmm.probability(X)
+    perc = np.quantile(prob, 1 - quantile)
+    return X[prob > perc]
+
+
 def fit_gmm(cntrl, treat, expected_params, max_gmm_fit_depth=10_000,
-            balance_method=None):
+            balance_method=None, refit_quantile=0.95):
     '''
     Fits a bivariate, two-gaussian GMM to pooled data and measures KL
     divergence of the resulting distributions.
@@ -85,11 +84,15 @@ def fit_gmm(cntrl, treat, expected_params, max_gmm_fit_depth=10_000,
         ]),
     ])
     gmm.fit(pooled)
+    # sometimes using the first model to remove outliers can improve the fit
+    if refit_quantile != 1:
+        pooled = remove_outliers(gmm, pooled, refit_quantile)
+        gmm.fit(pooled)
     # just use the kl divergence for the currents cause I don't understnad
     # how to calculate for multivariate gaussians...
     kld = kl_divergence(
-        *gmm.distributions[0].parameters[0][0].parameters,
-        *gmm.distributions[1].parameters[0][0].parameters,
+        *gmm.distributions[0][0].parameters,
+        *gmm.distributions[1][0].parameters,
     )
     return gmm, kld
 
@@ -157,6 +160,7 @@ def gmm_g_test(cntrl_preds, cntrl_reps,
 def position_stats(cntrl, treat, kmer,
                    max_gmm_fit_depth=10_000,
                    balance_method=None,
+                   refit_quantile=0.95,
                    min_kld=0.5,
                    p_val_threshold=0.05,
                    model=load_model_priors()):
@@ -175,9 +179,11 @@ def position_stats(cntrl, treat, kmer,
         expected_params = model[kmer]
         gmm, kld = fit_gmm(
             cntrl, treat, expected_params,
-            max_gmm_fit_depth, balance_method
+            max_gmm_fit_depth, balance_method,
+            refit_quantile
         )
-        fit_mean, fit_std = gmm.distributions[1].parameters
+        current_mean, current_std = gmm.distributions[1][0].parameters
+        dwell_mean, dwell_std = gmm.distributions[1][1].parameters
         # if the KL divergence of the distributions is too small we stop here
         if kld >= min_kld:
             pass_kld = True
@@ -193,7 +199,9 @@ def position_stats(cntrl, treat, kmer,
         return [
             True, log_odds, p_val, 1,       # placeholder for fdr
             cntrl_frac_mod, treat_frac_mod,
-            g_stat, hom_g_stat, kld
+            g_stat, hom_g_stat,
+            current_mean, current_std,
+            dwell_mean, dwell_std, kld
         ]
     else:
         return [False, ]
@@ -260,7 +268,7 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
 
 def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                min_depth=10, max_gmm_fit_depth=10_000, balance_method=None,
-               min_kld=0.5, p_val_threshold=0.05):
+               refit_quantile=0.95, min_kld=0.5, p_val_threshold=0.05):
     '''
     run the GMM tests on a subset of gene_ids
     '''
@@ -276,6 +284,7 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                     cntrl, treat, kmer,
                     max_gmm_fit_depth=max_gmm_fit_depth,
                     balance_method=balance_method,
+                    refit_quantile=refit_quantile,
                     min_kld=min_kld,
                     p_val_threshold=p_val_threshold,
                     model=model,
@@ -286,9 +295,20 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
     return chunk_res
 
 
+RESULTS_COLUMNS = [
+    'chrom', 'pos', 'gene_id', 'kmer', 'strand',
+    'log_odds', 'p_val', 'fdr',
+    'cntrl_frac_mod', 'treat_frac_mod',
+    'g_stat', 'hom_g_stat',
+    'current_mu', 'current_std', 'dwell_mu', 'dwell_std',
+    'kl_divergence',
+]
+
+
 def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                   min_depth=10, max_gmm_fit_depth=10_000, balance_method=None,
-                  min_kld=0.5, p_val_threshold=0.05, processes=1):
+                  refit_quantile=0.95, min_kld=0.5, p_val_threshold=0.05,
+                  processes=1):
     '''
     Runs the GMM tests on positions from gene_ids which are found in all HDF5.
     Gene ids are processed as parallel chunks.
@@ -310,6 +330,7 @@ def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
             min_depth=min_depth,
             max_gmm_fit_depth=max_gmm_fit_depth,
             balance_method=balance_method,
+            refit_quantile=refit_quantile,
             min_kld=min_kld,
             p_val_threshold=p_val_threshold
         )
@@ -344,13 +365,15 @@ def check_custom_filter_exprs(exprs, columns=RESULTS_COLUMNS):
 @click.option('-b', '--class-balance-method', required=False,
               type=click.Choice(['none', 'undersample', 'oversample']),
               default='none')
+@click.option('-q', '--outlier-quantile', required=False, default=0.95)
 @click.option('-k', '--min-kl-divergence', required=False, default=0.5)
 @click.option('-f', '--fdr-threshold', required=False, default=0.05)
 @click.option('--custom-filter', required=False, default=None)
 @click.option('-p', '--processes', required=False, default=1)
 def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
              test_level, min_depth, max_gmm_fit_depth, class_balance_method,
-             min_kl_divergence, fdr_threshold, custom_filter, processes):
+             outlier_quantile, min_kl_divergence, fdr_threshold,
+             custom_filter, processes):
     '''
     Differential RNA modifications using nanopore DRS signal level data
     '''
@@ -369,6 +392,7 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
         min_depth=min_depth,
         max_gmm_fit_depth=max_gmm_fit_depth,
         balance_method=class_balance_method,
+        refit_quantile=outlier_quantile,
         min_kld=min_kl_divergence,
         p_val_threshold=fdr_threshold,
         processes=processes

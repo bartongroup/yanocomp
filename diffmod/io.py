@@ -359,13 +359,16 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
         for record in sig_res.itertuples(index=False):
             (chrom, pos, gene_id, kmer, strand,
              log_odds, pval, fdr, c_fm, t_fm,
-             g_stat, hom_g_stat, kld) = record
+             g_stat, hom_g_stat,
+             c_mu, c_std, d_mu, d_std, kld) = record
             score = int(round(min(- np.log10(fdr), 100)))
             bed_record = (
                 f'{chrom:s}\t{pos - 2:d}\t{pos + 3:d}\t'
                 f'{gene_id}:{kmer}\t{score:d}\t{strand:s}\t'
                 f'{log_odds:.2f}\t{pval:.2g}\t{fdr:.2g}\t'
                 f'{c_fm:.2f}\t{t_fm:.2f}\t'
-                f'{g_stat:.2f}\t{hom_g_stat:.2f}\t{kld:.2f}\n'
+                f'{g_stat:.2f}\t{hom_g_stat:.2f}\t'
+                f'{c_mu:.2f}\t{c_std:.2f}\t'
+                f'{d_mu:.2f}\t{d_std:.2f}\t{kld:.2f}\n'
             )
             bed.write(bed_record)
