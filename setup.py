@@ -24,7 +24,7 @@ setup(
         'statsmodels',
         'pomegranate>=0.13',
         'scikit-learn',
-        'h5py>=2.10.0',
+        'h5py>=2.10',
         'click',
         'click_log',
     ],

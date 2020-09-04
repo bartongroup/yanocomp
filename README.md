@@ -17,6 +17,6 @@
 
 ### TODO:
 
-* option to test at transcript level rather than gene level
 * output the single molecule predictions?
 * documentation...
+* tests..................

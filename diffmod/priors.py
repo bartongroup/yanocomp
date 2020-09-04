@@ -23,7 +23,7 @@ def load_kmers_for_gene_id_chunk(gene_id_chunk, hdf5_fns, max_events_per_pos):
     with hdf5_list(hdf5_fns) as datasets:
         for gene_id in gene_id_chunk:
             e = load_gene_events(gene_id, datasets, load_kmers=True)
-            e = e.groupby('pos').sample(
+            e = e.groupby('pos', sort=False).sample(
                 n=max_events_per_pos, replace=True
             )
             e = e[['kmer', 'mean', 'duration']]
@@ -45,7 +45,7 @@ def load_random_kmer_profiles(hdf5_fns, pool,
     )
     all_events = pool.map(_load_func, gene_id_chunks)
     all_events = pd.concat(all_events)
-    event_sample = all_events.groupby('kmer').sample(
+    event_sample = all_events.groupby('kmer', sort=False).sample(
         n=max_events_per_kmer, replace=True
     )
     return event_sample
@@ -66,7 +66,7 @@ def remove_outliers(kmer_events, pool, eps=2.5, min_sample_frac=0.1):
         eps=eps,
         min_sample_frac=min_sample_frac
     )
-    cleaned = pool.map(_filter_func, kmer_events.groupby('kmer'))
+    cleaned = pool.map(_filter_func, kmer_events.groupby('kmer', sort=False))
     return pd.concat(cleaned)
 
 
@@ -85,7 +85,7 @@ MODEL_COLUMNS = [
 
 def fit_models(kmer_events):
     res = []
-    for kmer, events in kmer_events.groupby('kmer'):
+    for kmer, events in kmer_events.groupby('kmer', sort=True):
         current_skew = stats.skew(events['mean'])
         current_model = pm.NormalDistribution.from_samples(
             events['mean'].values.reshape(-1, 1)

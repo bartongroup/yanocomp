@@ -199,14 +199,37 @@ def position_stats(cntrl, treat, kmer,
         return [False, ]
 
 
+def test_depth(cntrl_pos_events, treat_pos_events, min_depth=10):
+    cntrl_depth = cntrl_pos_events.replicate.value_counts()
+    treat_depth = treat_pos_events.replicate.value_counts()
+    return ((cntrl_depth >= min_depth).all() and 
+            (treat_depth >= min_depth).all())
+
+
+def iter_cntrl_treat_transcripts(cntrl, treat):
+    transcript_ids = set(cntrl.transcript_idx).intersection(
+        treat.transcript_idx
+    )
+    for transcript_id in transcript_ids:
+        query = f'transcript_idx == "{transcript_id}"'
+        yield transcript_id, cntrl.query(query), treat.query(query)
+
+
 def iter_positions(gene_id, cntrl_datasets, treat_datasets,
-                   min_depth=10):
+                   test_level='gene', min_depth=10):
     '''
     Generator which iterates over the positions in a gene
     which have the minimum depth in eventaligned reads.
     '''
-    cntrl_events = load_gene_events(gene_id, cntrl_datasets)
-    treat_events = load_gene_events(gene_id, treat_datasets)
+    cntrl_events = load_gene_events(
+        gene_id, cntrl_datasets,
+        load_transcript_ids=test_level == 'transcript'
+    )
+    treat_events = load_gene_events(
+        gene_id, treat_datasets,
+        load_transcript_ids=test_level == 'transcript'
+    )
+
     kmers = load_gene_kmers(gene_id, cntrl_datasets + treat_datasets)
     chrom, strand = load_gene_attrs(
         gene_id, cntrl_datasets
@@ -218,14 +241,24 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
         treat_pos_events = treat_events.query(
             f'pos == {pos}', parser='pandas', engine='numexpr'
         )
-        cntrl_depth = cntrl_pos_events.replicate.value_counts()
-        treat_depth = treat_pos_events.replicate.value_counts()
-        if (cntrl_depth >= min_depth).all() and (
-                treat_depth >= min_depth).all():
-            yield chrom, pos, strand, kmer, cntrl_pos_events, treat_pos_events
+        if test_level == 'gene':
+            if test_depth(cntrl_pos_events, treat_pos_events, min_depth):
+                yield (
+                    chrom, pos, gene_id, kmer, strand,
+                    cntrl_pos_events, treat_pos_events
+                )
+        else:
+            for transcript in iter_cntrl_treat_transcripts(cntrl_pos_events, 
+                                                           treat_pos_events):
+                transcript_id, cntrl_tpos_events, treat_tpos_events = transcript
+                if test_depth(cntrl_tpos_events, treat_tpos_events, min_depth):
+                    yield (
+                        chrom, pos, transcript_id, kmer, strand,
+                        cntrl_tpos_events, treat_tpos_events
+                    )
 
 
-def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None,
+def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                min_depth=10, max_gmm_fit_depth=10_000, balance_method=None,
                min_kld=0.5, p_val_threshold=0.05):
     '''
@@ -235,8 +268,10 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None,
     chunk_res = []
     with hdf5_list(cntrl_fns) as cntrl_h5, hdf5_list(treat_fns) as treat_h5:
         for gene_id in gene_ids:
-            pos_iter = iter_positions(gene_id, cntrl_h5, treat_h5, min_depth)
-            for chrom, pos, strand, kmer, cntrl, treat in pos_iter:
+            pos_iter = iter_positions(
+                gene_id, cntrl_h5, treat_h5, test_level, min_depth
+            )
+            for chrom, pos, feature_id, kmer, strand, cntrl, treat in pos_iter:
                 r = position_stats(
                     cntrl, treat, kmer,
                     max_gmm_fit_depth=max_gmm_fit_depth,
@@ -246,12 +281,12 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None,
                     model=model,
                 )
                 if r[0]:
-                    r = [chrom, pos, gene_id, kmer, strand] + r[1:]
+                    r = [chrom, pos, feature_id, kmer, strand] + r[1:]
                     chunk_res.append(r)
     return chunk_res
 
 
-def parallel_test(cntrl_fns, treat_fns, model_fn=None,
+def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                   min_depth=10, max_gmm_fit_depth=10_000, balance_method=None,
                   min_kld=0.5, p_val_threshold=0.05, processes=1):
     '''
@@ -271,6 +306,7 @@ def parallel_test(cntrl_fns, treat_fns, model_fn=None,
             cntrl_fns=cntrl_fns,
             treat_fns=treat_fns,
             model_fn=model_fn,
+            test_level=test_level,
             min_depth=min_depth,
             max_gmm_fit_depth=max_gmm_fit_depth,
             balance_method=balance_method,
@@ -301,6 +337,8 @@ def check_custom_filter_exprs(exprs, columns=RESULTS_COLUMNS):
 @click.option('-t', '--treat-hdf5-fns', required=True, multiple=True)
 @click.option('-o', '--output-bed-fn', required=True)
 @click.option('-m', '--prior-model-fn', required=False, default=None)
+@click.option('--test-level', required=False, default='gene',
+              type=click.Choice(['gene', 'transcript']))
 @click.option('-n', '--min-depth', required=False, default=10)
 @click.option('-d', '--max-gmm-fit-depth', required=False, default=10_000)
 @click.option('-b', '--class-balance-method', required=False,
@@ -311,9 +349,8 @@ def check_custom_filter_exprs(exprs, columns=RESULTS_COLUMNS):
 @click.option('--custom-filter', required=False, default=None)
 @click.option('-p', '--processes', required=False, default=1)
 def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
-             min_depth, max_gmm_fit_depth, class_balance_method,
-             min_kl_divergence, fdr_threshold,
-             custom_filter, processes):
+             test_level, min_depth, max_gmm_fit_depth, class_balance_method,
+             min_kl_divergence, fdr_threshold, custom_filter, processes):
     '''
     Differential RNA modifications using nanopore DRS signal level data
     '''
@@ -328,6 +365,7 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
     res = parallel_test(
         cntrl_hdf5_fns, treat_hdf5_fns,
         model_fn=prior_model_fn,
+        test_level=test_level,
         min_depth=min_depth,
         max_gmm_fit_depth=max_gmm_fit_depth,
         balance_method=class_balance_method,
