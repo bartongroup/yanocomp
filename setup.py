@@ -22,7 +22,7 @@ setup(
         'pandas>=1.1',
         'numexpr',
         'statsmodels',
-        'pomegranate>=0.13.3',
+        'pomegranate>=0.13',
         'scikit-learn',
         'h5py>=2.10.0',
         'click',

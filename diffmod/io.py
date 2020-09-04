@@ -360,7 +360,7 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
             (chrom, pos, gene_id, kmer, strand,
              log_odds, pval, fdr, c_fm, t_fm,
              g_stat, hom_g_stat, kld) = record
-            score = - int(round(min(np.log10(fdr), 1000)))
+            score = int(round(min(- np.log10(fdr), 100)))
             bed_record = (
                 f'{chrom:s}\t{pos - 2:d}\t{pos + 3:d}\t'
                 f'{gene_id}:{kmer}\t{score:d}\t{strand:s}\t'

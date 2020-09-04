@@ -207,7 +207,7 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
     '''
     cntrl_events = load_gene_events(gene_id, cntrl_datasets)
     treat_events = load_gene_events(gene_id, treat_datasets)
-    kmers = load_gene_kmers(cntrl_events + treat_events)
+    kmers = load_gene_kmers(gene_id, cntrl_datasets + treat_datasets)
     chrom, strand = load_gene_attrs(
         gene_id, cntrl_datasets
     )
