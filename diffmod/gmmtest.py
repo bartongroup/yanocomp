@@ -19,6 +19,13 @@ from .io import (
 logger = logging.getLogger('diffmod')
 
 
+def stack_mean_and_duration(events):
+    return np.concatenate(
+        [events['mean'].values, events['duration'].values],
+        axis=1
+    )
+
+
 def kl_divergence(X_mu, X_sigma, Y_mu, Y_sigma):
     '''
     measure of divergence between two distributions
@@ -56,31 +63,27 @@ def remove_outliers(gmm, X, quantile=0.99):
     return X[prob > perc]
 
 
-def fit_gmm(cntrl, treat, expected_params, max_gmm_fit_depth=10_000,
+def fit_gmm(cntrl, treat, expected_params,
+            max_gmm_fit_depth=10_000,
             balance_method=None, refit_quantile=0.95):
     '''
-    Fits a bivariate, two-gaussian GMM to pooled data and measures KL
+    Fits a multivariate, two-gaussian GMM to pooled data and measures KL
     divergence of the resulting distributions.
     '''
+    window_size = len(expected_params) // 2
+    centre = window_size // 2
     cntrl, treat = correct_class_imbalance(
         cntrl, treat, max_gmm_fit_depth, balance_method
     )
-    pooled = np.concatenate([
-        cntrl[['mean', 'duration']].values,
-        treat[['mean', 'duration']].values
-    ])
-    assert len(pooled) <= max_gmm_fit_depth
-    # Model starts as two identical bi-variate normal distributions initialised
+    pooled = np.concatenate([cntrl, treat], axis=0)
+    # Model starts as two identical multivariate normal distributions initialised
     # from the expected parameters. The first is frozen (i.e. cannot be fit).
-    current_mu, current_sigma, dwell_mu, dwell_sigma = expected_params
     gmm = pm.GeneralMixtureModel([
         pm.IndependentComponentsDistribution([
-            pm.NormalDistribution(current_mu, current_sigma),
-            pm.NormalDistribution(dwell_mu, dwell_sigma),
+            pm.NormalDistribution(*p, frozen=True) for p in expected_params
         ], frozen=True),
         pm.IndependentComponentsDistribution([
-            pm.NormalDistribution(current_mu, current_sigma),
-            pm.NormalDistribution(dwell_mu, dwell_sigma),
+            pm.NormalDistribution(*p) for p in expected_params
         ]),
     ])
     gmm.fit(pooled)
@@ -91,8 +94,8 @@ def fit_gmm(cntrl, treat, expected_params, max_gmm_fit_depth=10_000,
     # just use the kl divergence for the currents cause I don't understnad
     # how to calculate for multivariate gaussians...
     kld = kl_divergence(
-        *gmm.distributions[0][0].parameters,
-        *gmm.distributions[1][0].parameters,
+        *gmm.distributions[0][centre].parameters,
+        *gmm.distributions[1][centre].parameters,
     )
     return gmm, kld
 
@@ -102,7 +105,7 @@ def gmm_predictions(gmm, events, pseudocount=np.finfo('f').tiny):
     Use the GMM to make single molecule predictions and calculate fraction
     modified.
     '''
-    probs = gmm.predict_proba(events[['mean', 'duration']])
+    probs = gmm.predict_proba(events)
     preds = probs.argmax(1)
     log_prob = np.log2(probs.sum(0) + pseudocount)
     log_ratio = log_prob[1] - log_prob[0]
@@ -157,7 +160,7 @@ def gmm_g_test(cntrl_preds, cntrl_reps,
     return het_g, hom_g, p_val
 
 
-def position_stats(cntrl, treat, kmer,
+def position_stats(cntrl, treat,
                    max_gmm_fit_depth=10_000,
                    balance_method=None,
                    refit_quantile=0.95,
@@ -167,37 +170,46 @@ def position_stats(cntrl, treat, kmer,
     '''
     Fits the GMM, estimates mod rates/changes, and performs G test
     '''
+    window_size = len(cntrl.pos)
+    centre = window_size // 2
     # first test that there is actually some difference in cntrl/treat
     pass_ttest = False
     pass_kld = False
     _, tt_p_val = stats.ttest_ind(
-        cntrl['mean'], treat['mean'], equal_var=False
+        cntrl['mean'].values[:, centre],
+        treat['mean'].values[:, centre],
+        equal_var=False
     )
     # if there is we can perform the GMM fit and subsequent G test
     if tt_p_val < p_val_threshold:
         pass_ttest = True
-        expected_params = model[kmer]
+        expected_params = model.loc[:, cntrl.kmer]
+        expected_params = expected_params.values.reshape(2, -1).T
+        cntrl_fit_data = stack_mean_and_duration(cntrl)
+        treat_fit_data = stack_mean_and_duration(treat)
         gmm, kld = fit_gmm(
-            cntrl, treat, expected_params,
+            cntrl_fit_data, treat_fit_data,
+            expected_params,
             max_gmm_fit_depth, balance_method,
             refit_quantile
         )
-        current_mean, current_std = gmm.distributions[1][0].parameters
-        dwell_mean, dwell_std = gmm.distributions[1][1].parameters
+        current_mean, current_std = gmm.distributions[1][centre].parameters
+        dwell_mean, dwell_std = gmm.distributions[1][window_size + centre].parameters
         # if the KL divergence of the distributions is too small we stop here
         if kld >= min_kld:
             pass_kld = True
-            cntrl_preds, cntrl_frac_mod, cntrl_lr = gmm_predictions(gmm, cntrl)
-            treat_preds, treat_frac_mod, treat_lr = gmm_predictions(gmm, treat)
+            cntrl_preds, cntrl_frac_mod, cntrl_lr = gmm_predictions(gmm, cntrl_fit_data)
+            treat_preds, treat_frac_mod, treat_lr = gmm_predictions(gmm, treat_fit_data)
             log_odds = treat_lr - cntrl_lr
             g_stat, hom_g_stat, p_val = gmm_g_test(
-                cntrl_preds, cntrl['replicate'],
-                treat_preds, treat['replicate'],
+                cntrl_preds, cntrl['replicate'].values,
+                treat_preds, treat['replicate'].values,
                 p_val_threshold=p_val_threshold
             )
     if pass_kld & pass_ttest:
+        kmer = cntrl['kmer'].values[centre]
         return [
-            True, log_odds, p_val, 1,       # placeholder for fdr
+            True, kmer, log_odds, p_val, 1,       # placeholder for fdr
             cntrl_frac_mod, treat_frac_mod,
             g_stat, hom_g_stat,
             current_mean, current_std,
@@ -207,68 +219,56 @@ def position_stats(cntrl, treat, kmer,
         return [False, ]
 
 
-def test_depth(cntrl_pos_events, treat_pos_events, min_depth=10):
-    cntrl_depth = cntrl_pos_events.replicate.value_counts()
-    treat_depth = treat_pos_events.replicate.value_counts()
-    return ((cntrl_depth >= min_depth).all() and 
-            (treat_depth >= min_depth).all())
+def index_pos_range(events, win):
+    events = events.loc[{'pos': win}]
+    events = events.dropna(dim='read_idx')
+    return events
 
 
-def iter_cntrl_treat_transcripts(cntrl, treat):
-    transcript_ids = set(cntrl.transcript_idx).intersection(
-        treat.transcript_idx
-    )
-    for transcript_id in transcript_ids:
-        query = f'transcript_idx == "{transcript_id}"'
-        yield transcript_id, cntrl.query(query), treat.query(query)
+def test_depth(cntrl_pos_events, treat_pos_events, min_depth=5):
+    if not len(cntrl_pos_events.read_idx) or not len(treat_pos_events.read_idx):
+        return False
+    else:
+        cntrl_depth = cntrl_pos_events.read_idx.groupby('replicate').count()
+        treat_depth = treat_pos_events.read_idx.groupby('replicate').count()
+        return ((cntrl_depth >= min_depth).all() and 
+                (treat_depth >= min_depth).all())
 
 
 def iter_positions(gene_id, cntrl_datasets, treat_datasets,
-                   test_level='gene', min_depth=10):
+                   test_level='gene', window_size=3, min_depth=5):
     '''
     Generator which iterates over the positions in a gene
     which have the minimum depth in eventaligned reads.
     '''
+    if test_level == 'transcript':
+        raise NotImplementedError('needs redoing...')
     cntrl_events = load_gene_events(
         gene_id, cntrl_datasets,
-        load_transcript_ids=test_level == 'transcript'
     )
     treat_events = load_gene_events(
         gene_id, treat_datasets,
-        load_transcript_ids=test_level == 'transcript'
     )
-
-    kmers = load_gene_kmers(gene_id, cntrl_datasets + treat_datasets)
     chrom, strand = load_gene_attrs(
         gene_id, cntrl_datasets
     )
-    for pos, kmer in kmers.items():
-        cntrl_pos_events = cntrl_events.query(
-            f'pos == {pos}', parser='pandas', engine='numexpr'
-        )
-        treat_pos_events = treat_events.query(
-            f'pos == {pos}', parser='pandas', engine='numexpr'
-        )
-        if test_level == 'gene':
-            if test_depth(cntrl_pos_events, treat_pos_events, min_depth):
-                yield (
-                    chrom, pos, gene_id, kmer, strand,
-                    cntrl_pos_events, treat_pos_events
-                )
-        else:
-            for transcript in iter_cntrl_treat_transcripts(cntrl_pos_events, 
-                                                           treat_pos_events):
-                transcript_id, cntrl_tpos_events, treat_tpos_events = transcript
-                if test_depth(cntrl_tpos_events, treat_tpos_events, min_depth):
-                    yield (
-                        chrom, pos, transcript_id, kmer, strand,
-                        cntrl_tpos_events, treat_tpos_events
-                    )
+    valid_pos = set(cntrl_events.pos.values).intersection(treat_events.pos.values)
+    for pos in valid_pos:
+        win = np.arange(pos - window_size // 2, pos + window_size // 2 + 1)
+        try:
+            cntrl_pos_events = index_pos_range(cntrl_events, win)
+            treat_pos_events = index_pos_range(treat_events, win)
+        except KeyError:
+            # no data for at least one position in window
+            continue
+        if test_depth(cntrl_pos_events, treat_pos_events, min_depth):
+            yield chrom, pos, gene_id, strand, cntrl_pos_events, treat_pos_events
 
 
 def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
-               min_depth=10, max_gmm_fit_depth=10_000, balance_method=None,
-               refit_quantile=0.95, min_kld=0.5, p_val_threshold=0.05):
+               window_size=3, min_depth=5, max_gmm_fit_depth=10_000,
+               balance_method=None, refit_quantile=0.95, min_kld=0.5,
+               p_val_threshold=0.05):
     '''
     run the GMM tests on a subset of gene_ids
     '''
@@ -277,11 +277,14 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
     with hdf5_list(cntrl_fns) as cntrl_h5, hdf5_list(treat_fns) as treat_h5:
         for gene_id in gene_ids:
             pos_iter = iter_positions(
-                gene_id, cntrl_h5, treat_h5, test_level, min_depth
+                gene_id, cntrl_h5, treat_h5,
+                test_level=test_level,
+                window_size=window_size,
+                min_depth=min_depth
             )
-            for chrom, pos, feature_id, kmer, strand, cntrl, treat in pos_iter:
+            for chrom, pos, feature_id, strand, cntrl, treat in pos_iter:
                 r = position_stats(
-                    cntrl, treat, kmer,
+                    cntrl, treat,
                     max_gmm_fit_depth=max_gmm_fit_depth,
                     balance_method=balance_method,
                     refit_quantile=refit_quantile,
@@ -290,7 +293,7 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                     model=model,
                 )
                 if r[0]:
-                    r = [chrom, pos, feature_id, kmer, strand] + r[1:]
+                    r = [chrom, pos, feature_id, strand] + r[1:]
                     chunk_res.append(r)
     return chunk_res
 
@@ -306,9 +309,9 @@ RESULTS_COLUMNS = [
 
 
 def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
-                  min_depth=10, max_gmm_fit_depth=10_000, balance_method=None,
-                  refit_quantile=0.95, min_kld=0.5, p_val_threshold=0.05,
-                  processes=1):
+                  window_size=3, min_depth=5, max_gmm_fit_depth=10_000,
+                  balance_method=None, refit_quantile=0.95, min_kld=0.5,
+                  p_val_threshold=0.05, processes=1):
     '''
     Runs the GMM tests on positions from gene_ids which are found in all HDF5.
     Gene ids are processed as parallel chunks.
@@ -327,6 +330,7 @@ def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
             treat_fns=treat_fns,
             model_fn=model_fn,
             test_level=test_level,
+            window_size=window_size,
             min_depth=min_depth,
             max_gmm_fit_depth=max_gmm_fit_depth,
             balance_method=balance_method,
@@ -360,7 +364,8 @@ def check_custom_filter_exprs(exprs, columns=RESULTS_COLUMNS):
 @click.option('-m', '--prior-model-fn', required=False, default=None)
 @click.option('--test-level', required=False, default='gene',
               type=click.Choice(['gene', 'transcript']))
-@click.option('-n', '--min-depth', required=False, default=10)
+@click.option('-w', '--window-size', required=False, default=3)
+@click.option('-n', '--min-depth', required=False, default=5)
 @click.option('-d', '--max-gmm-fit-depth', required=False, default=10_000)
 @click.option('-b', '--class-balance-method', required=False,
               type=click.Choice(['none', 'undersample', 'oversample']),
@@ -371,9 +376,9 @@ def check_custom_filter_exprs(exprs, columns=RESULTS_COLUMNS):
 @click.option('--custom-filter', required=False, default=None)
 @click.option('-p', '--processes', required=False, default=1)
 def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
-             test_level, min_depth, max_gmm_fit_depth, class_balance_method,
-             outlier_quantile, min_kl_divergence, fdr_threshold,
-             custom_filter, processes):
+             test_level, window_size, min_depth, max_gmm_fit_depth,
+             class_balance_method, outlier_quantile, min_kl_divergence,
+             fdr_threshold, custom_filter, processes):
     '''
     Differential RNA modifications using nanopore DRS signal level data
     '''
@@ -389,6 +394,7 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
         cntrl_hdf5_fns, treat_hdf5_fns,
         model_fn=prior_model_fn,
         test_level=test_level,
+        window_size=window_size,
         min_depth=min_depth,
         max_gmm_fit_depth=max_gmm_fit_depth,
         balance_method=class_balance_method,
