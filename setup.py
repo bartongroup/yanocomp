@@ -20,6 +20,7 @@ setup(
         'numpy',
         'scipy',
         'pandas>=1.1',
+        'xarray>=0.16',
         'numexpr',
         'statsmodels',
         'pomegranate>=0.13',
