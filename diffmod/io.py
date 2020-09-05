@@ -9,6 +9,7 @@ from collections import defaultdict, OrderedDict
 
 import numpy as np
 import pandas as pd
+import xarray as xr
 import h5py as h5
 
 logger = logging.getLogger('diffmod')
@@ -248,6 +249,24 @@ def get_shared_keys(hdf5_handles):
     return list(genes)
 
 
+def build_xr_dataset(events, replicates, kmers, transcripts=None):
+    # build dense 2D xarray dataset with dims read_idx, pos
+    # many positions will be nans as not all reads cover all pos
+    means = events.pivot_table('mean', 'read_idx', 'pos')
+    durations = events.pivot_table('duration','read_idx', 'pos')
+    coords = {
+        'replicate': ('read_idx', replicates),
+        'kmer': ('pos', kmers),
+    }
+    if transcripts is not None:
+        coords['transcript_idx'] = ('read_idx', transcripts)
+    events = xr.Dataset(
+        {'mean': means, 'duration': durations},
+        coords=coords,
+    )
+    return events
+
+
 def load_gene_kmers(gene_id, datasets):
     '''
     Get all recorded kmers from the different datasets
@@ -259,39 +278,7 @@ def load_gene_kmers(gene_id, datasets):
             np.dtype([('pos', np.uint32), ('kmer', 'U5')])
         )
         kmers.update(dict(k))
-    return kmers
-
-
-def load_gene_events(gene_id, datasets,
-                     load_kmers=False,
-                     load_transcript_ids=False,
-                     load_read_ids=False):
-    '''
-    Extract the event alignment table for a given gene from a
-    list of HDF5 file objects
-    '''
-    gene_events = []
-    for i, d in enumerate(datasets, 1):
-        # read full dataset from disk
-        e = pd.DataFrame(d[f'{gene_id}/events'][:])
-        # convert f16 to f64
-        e['mean'] = e['mean'].astype(np.float64)
-        e['duration'] = np.log10(e['duration'].astype(np.float64))
-        if load_transcript_ids:
-            t = d[f'{gene_id}/transcript_ids'][:]
-            t = {i: t_id for i, t_id in enumerate(t)}
-            e['transcript_idx'] = e.transcript_idx.map(t)
-        if load_read_ids:
-            r = d[f'{gene_id}/read_ids'][:].astype('U32')
-            r = {i: r_id for i, r_id in enumerate(r)}
-            e['read_idx'] = e.read_idx.map(r)
-        e['replicate'] = i
-        gene_events.append(e)
-    gene_events = pd.concat(gene_events)
-    if load_kmers:
-        kmers = load_gene_kmers(gene_id, datasets)
-        gene_events['kmer'] = gene_events.pos.map(kmers)
-    return gene_events
+    return pd.Series(kmers).sort_index()
 
 
 def load_gene_attrs(gene_id, datasets):
@@ -304,6 +291,55 @@ def load_gene_attrs(gene_id, datasets):
     chrom = g.attrs['chrom']
     strand = g.attrs['strand']
     return chrom, strand
+
+
+def load_gene_events(gene_id, datasets,
+                     load_transcript_ids=False):
+    '''
+    Extract the event alignment table for a given gene from a
+    list of HDF5 file objects
+    '''
+    gene_events = []
+    replicates = {}
+    if load_transcript_ids:
+        transcripts = {}
+    else:
+        transcripts = None
+    for rep, d in enumerate(datasets, 1):
+        # read full dataset from disk
+        e = pd.DataFrame(d[f'{gene_id}/events'][:])
+        # convert f16 to f64
+        e['mean'] = e['mean'].astype(np.float64)
+        e['duration'] = np.log10(e['duration'].astype(np.float64))
+        e['read_idx'] = e['read_idx'].astype(np.uint32)
+        e['transcript_idx'] = e['transcript_idx'].astype(np.uint32)
+
+        r_ids = d[f'{gene_id}/read_ids'][:].astype('U32')
+        e['read_idx'] = e.read_idx.map(
+            {i: r_id for i, r_id in enumerate(r_ids)}
+        )
+        replicates.update({r_id: rep for r_id in r_ids})
+
+        if load_transcript_ids:
+            t_ids = d[f'{gene_id}/transcript_ids'][:]
+            t_map = {
+                r_id: t_ids[i] for r_id, i in
+                e.set_index('read_idx').transcript_idx.to_dict().items()
+            }
+            transcripts.update(t_map)
+
+        gene_events.append(e)
+
+    replicates = pd.Series(replicates).sort_index()
+    if transcripts is not None:
+        transcripts = pd.Series(transcripts).sort_index()
+    gene_events = pd.concat(gene_events)
+    kmers = load_gene_kmers(gene_id, datasets)
+    gene_events = build_xr_dataset(
+        gene_events, replicates,
+        kmers, transcripts
+    )
+    return gene_events
 
 
 # functions for loading/saving output from `priors` and `gmmtest` commands
@@ -334,8 +370,8 @@ def load_model_priors(model_fn=None):
     m = pd.read_csv(
         model_fn, sep='\t', comment='#', index_col='kmer'
     )
-    m = m[['current_mean', 'current_std', 'dwell_mean', 'dwell_std']]
-    return m.T.to_dict(orient='list')
+    m = m[['current_mean', 'dwell_mean', 'current_std', 'dwell_std']]
+    return m.transpose()
 
 
 def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
