@@ -236,19 +236,35 @@ def test_depth(cntrl_pos_events, treat_pos_events, min_depth=5):
                 (treat_depth >= min_depth).all())
 
 
+def iter_transcripts(cntrl, treat):
+    cntrl_transcripts = set(cntrl.transcript_idx.values)
+    treat_transcripts = set(treat.transcript_idx.values)
+    if (len(cntrl_transcripts) == 1) and (cntrl_transcripts == treat_transcripts):
+        yield cntrl_transcripts.pop(), cntrl, treat
+    else:
+        transcript_ids = cntrl_transcripts.intersection(treat_transcripts)
+        for transcript_id in transcript_ids:
+            c_mask = cntrl.transcript_idx.values == transcript_id
+            t_mask = treat.transcript_idx.values == transcript_id
+            yield (transcript_id,
+                   cntrl.loc[{'read_idx': c_mask}],
+                   treat.loc[{'read_idx': t_mask}])
+
+
 def iter_positions(gene_id, cntrl_datasets, treat_datasets,
                    test_level='gene', window_size=3, min_depth=5):
     '''
     Generator which iterates over the positions in a gene
     which have the minimum depth in eventaligned reads.
     '''
-    if test_level == 'transcript':
-        raise NotImplementedError('needs redoing...')
+    by_transcript = test_level == 'transcript'
     cntrl_events = load_gene_events(
         gene_id, cntrl_datasets,
+        load_transcript_ids=by_transcript
     )
     treat_events = load_gene_events(
         gene_id, treat_datasets,
+        load_transcript_ids=by_transcript
     )
     chrom, strand = load_gene_attrs(
         gene_id, cntrl_datasets
@@ -262,7 +278,15 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
         except KeyError:
             # no data for at least one position in window
             continue
-        if test_depth(cntrl_pos_events, treat_pos_events, min_depth):
+        if by_transcript:
+            for transcript_id, *transcript_events in iter_transcripts(
+                    cntrl_pos_events, treat_pos_events):
+                cntrl_tpos_events, treat_tpos_events = transcript_events
+                if test_depth(cntrl_tpos_events, treat_tpos_events, min_depth):
+                    yield (chrom, pos, transcript_id, strand,
+                           cntrl_tpos_events, treat_tpos_events)
+
+        elif test_depth(cntrl_pos_events, treat_pos_events, min_depth):
             yield chrom, pos, gene_id, strand, cntrl_pos_events, treat_pos_events
 
 
