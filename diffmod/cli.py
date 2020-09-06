@@ -1,3 +1,7 @@
+import cProfile
+import pstats
+from io import StringIO
+import atexit
 import logging
 import click
 import click_log
@@ -5,6 +9,13 @@ import click_log
 from .prep import nanopolish_collapse
 from .priors import model_priors
 from .gmmtest import gmm_test
+
+
+COMMANDS = {
+    'prep': nanopolish_collapse,
+    'priors': model_priors,
+    'gmmtest': gmm_test,
+}
 
 
 def get_logger(name):
@@ -16,22 +27,30 @@ def get_logger(name):
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.propagate = False
-    log_opt = click_log.simple_verbosity_option(logger)
-    return log_opt
+    return logger
 
 
-log_opt = get_logger('diffmod')
-
-COMMANDS = {
-    'prep': log_opt(nanopolish_collapse),
-    'priors': log_opt(model_priors),
-    'gmmtest': log_opt(gmm_test),
-}
+logger = get_logger('diffmod')
 
 
 @click.group(commands=COMMANDS)
-def cli():
-    pass
+@click_log.simple_verbosity_option(logger)
+@click.option("--profile", is_flag=True, hidden=True)
+def cli(profile):
+    if profile:
+        logger.debug('Running with profiler...')
+        prof = cProfile.Profile()
+        prof.enable()
+
+        @atexit.register
+        def print_profile_stats_on_exit():
+            prof.disable()
+            logger.debug('Profiling complete')
+            s = StringIO()
+            prof_stats = pstats.Stats(prof, stream=s)
+            prof_stats.sort_stats('cumulative').print_stats(50)
+            logger.debug(s.getvalue())
+
 
 
 if __name__ == '__main__':
