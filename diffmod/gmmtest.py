@@ -39,19 +39,20 @@ def kl_divergence(X_mu, X_sigma, Y_mu, Y_sigma):
 def correct_class_imbalance(cntrl, treat, max_depth, method=None):
     n_cntrl, n_treat = len(cntrl), len(treat)
     max_depth_per_samp = max_depth // 2
+    rng = np.random.default_rng()
     if method is None or method == 'none':
         if n_cntrl > max_depth_per_samp:
-            cntrl = cntrl.sample(max_depth_per_samp, replace=False)
+            cntrl = rng.choice(cntrl, max_depth_per_samp, replace=False)
         if n_treat > max_depth_per_samp:
-            treat = treat.sample(max_depth_per_samp, replace=False)
+            treat = rng.choice(treat, max_depth_per_samp, replace=False)
     elif method == 'undersample':
         n_samp = min(n_treat, n_cntrl, max_depth_per_samp)
-        cntrl = cntrl.sample(n_samp, replace=False)
-        treat = treat.sample(n_samp, replace=False)
+        cntrl = rng.choice(cntrl, n_samp, replace=False)
+        treat = rng.choice(treat, n_samp, replace=False)
     elif method == 'oversample':
         n_samp = min(max_depth_per_samp, max(n_cntrl, n_treat))
-        cntrl = cntrl.sample(n_samp, replace=True)
-        treat = treat.sample(n_samp, replace=True)
+        cntrl = rng.choice(cntrl, n_samp, replace=True)
+        treat = rng.choice(treat, n_samp, replace=True)
     else:
         raise ValueError(f'Sampling method "{method}" not implemented')
     return cntrl, treat

@@ -252,16 +252,16 @@ def get_shared_keys(hdf5_handles):
 def build_xr_dataset(events, replicates, kmers, transcripts=None):
     # build dense 2D xarray dataset with dims read_idx, pos
     # many positions will be nans as not all reads cover all pos
-    means = events.pivot_table('mean', 'read_idx', 'pos')
-    durations = events.pivot_table('duration','read_idx', 'pos')
     coords = {
         'replicate': ('read_idx', replicates),
         'kmer': ('pos', kmers),
     }
     if transcripts is not None:
         coords['transcript_idx'] = ('read_idx', transcripts)
+
+    events = events.pivot('read_idx', 'pos', ['mean', 'duration'])
     events = xr.Dataset(
-        {'mean': means, 'duration': durations},
+        {'mean': events['mean'], 'duration': events['duration']},
         coords=coords,
     )
     return events
@@ -311,23 +311,29 @@ def load_gene_events(gene_id, datasets,
         # convert f16 to f64
         e['mean'] = e['mean'].astype(np.float64)
         e['duration'] = np.log10(e['duration'].astype(np.float64))
-        e['read_idx'] = e['read_idx'].astype(np.uint32)
-        e['transcript_idx'] = e['transcript_idx'].astype(np.uint32)
+        e['read_idx'] = e['read_idx'].astype('category')
+        e['transcript_idx'] = e['transcript_idx'].astype('category')
+        # even when secondary alignments are switched off minimap2
+        # can produce some primary multimappers which need to be
+        # deduplicated
+        e.drop_duplicates(['read_idx', 'pos'], keep='first', inplace=True)
 
         r_ids = d[f'{gene_id}/read_ids'][:].astype('U32')
-        e['read_idx'] = e.read_idx.map(
-            {i: r_id for i, r_id in enumerate(r_ids)}
+        e['read_idx'].cat.rename_categories(
+            dict(enumerate(r_ids)),
+            inplace=True
         )
         replicates.update({r_id: rep for r_id in r_ids})
 
         if load_transcript_ids:
             t_ids = d[f'{gene_id}/transcript_ids'][:]
-            t_map = {
-                r_id: t_ids[i] for r_id, i in
-                e.set_index('read_idx').transcript_idx.to_dict().items()
-            }
-            transcripts.update(t_map)
-
+            e['transcript_idx'].cat.rename_categories(
+                dict(enumerate(t_ids)),
+                inplace=True
+            )
+            transcripts.update(
+                dict(e[['read_idx', 'transcript_idx']].values)
+            )
         gene_events.append(e)
 
     replicates = pd.Series(replicates).sort_index()
@@ -340,7 +346,6 @@ def load_gene_events(gene_id, datasets,
         kmers, transcripts
     )
     return gene_events
-
 
 # functions for loading/saving output from `priors` and `gmmtest` commands
 
