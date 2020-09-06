@@ -52,6 +52,5 @@ def cli(profile):
             logger.debug(s.getvalue())
 
 
-
 if __name__ == '__main__':
     cli()

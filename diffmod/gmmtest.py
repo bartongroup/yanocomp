@@ -26,14 +26,12 @@ def stack_mean_and_duration(events):
     )
 
 
-def kl_divergence(X_mu, X_sigma, Y_mu, Y_sigma):
-    '''
-    measure of divergence between two distributions
-    '''
-    X_var, Y_var = X_sigma ** 2, Y_sigma ** 2
-    lsr = np.log(Y_sigma / X_sigma)
-    sdm = (X_mu - Y_mu) ** 2
-    return lsr + (X_var + sdm) / (2 * Y_var) - 0.5
+def kl_divergence(mvg_1, mvg_2, n_samples=10_000):
+    '''monte carlo simulated KL divergence'''
+    X = mvg_1.sample(n_samples)
+    pred_1 = mvg_1.log_probability(X)
+    pred_2 = mvg_2.log_probability(X)
+    return pred_1.mean() - pred_2.mean()
 
 
 def correct_class_imbalance(cntrl, treat, max_depth, method=None):
@@ -92,12 +90,7 @@ def fit_gmm(cntrl, treat, expected_params,
     if refit_quantile != 1:
         pooled = remove_outliers(gmm, pooled, refit_quantile)
         gmm.fit(pooled)
-    # just use the kl divergence for the currents cause I don't understnad
-    # how to calculate for multivariate gaussians...
-    kld = kl_divergence(
-        *gmm.distributions[0][centre].parameters,
-        *gmm.distributions[1][centre].parameters,
-    )
+    kld = kl_divergence(gmm.distributions[0], gmm.distributions[1])
     return gmm, kld
 
 
@@ -174,6 +167,7 @@ def position_stats(cntrl, treat,
     window_size = len(cntrl.pos)
     centre = window_size // 2
     # first test that there is actually some difference in cntrl/treat
+    # easiest way to do this is to just test the central kmer...
     pass_ttest = False
     pass_kld = False
     _, tt_p_val = stats.ttest_ind(
@@ -255,9 +249,9 @@ def get_valid_pos(events, min_depth):
     depth = (events['mean'].notnull()
                            .groupby('replicate')
                            .sum('read_idx'))
-    at_min_depth = (depth >= min_depth).all('replicate').values
+    at_min_depth = (depth.values >= min_depth).all(0)
     valid_pos = events['pos'].values[at_min_depth]
-    return valid_pos
+    return set(valid_pos)
 
 
 def get_valid_windows(valid_pos, window_size=3):
@@ -272,7 +266,7 @@ def get_cntrl_treat_valid_pos(cntrl_events, treat_events,
                               min_depth=5, window_size=3):
     cntrl_valid_pos = get_valid_pos(cntrl_events, min_depth)
     treat_valid_pos = get_valid_pos(treat_events, min_depth)
-    valid_pos = set(cntrl_valid_pos).intersection(treat_valid_pos)
+    valid_pos = cntrl_valid_pos.intersection(treat_valid_pos)
     yield from get_valid_windows(valid_pos, window_size=3)       
 
 
@@ -295,7 +289,7 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
         gene_id, cntrl_datasets
     )
     # first attempt to filter out any positions below the min_depth threshold
-    # we still need to check again later, this just prevents costly indexing...
+    # we still need to check again later, this just prevents costly xarray ops...
     valid_pos = get_cntrl_treat_valid_pos(
         cntrl_events, treat_events,
         min_depth=min_depth
@@ -404,13 +398,28 @@ def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
     return res
 
 
-def check_custom_filter_exprs(exprs, columns=RESULTS_COLUMNS):
+def check_custom_filter_exprs(exprs):
     '''
     checks filter expressions for pandas dataframes using dummy dataframe
     '''
     dummy = pd.DataFrame([], columns=RESULTS_COLUMNS)
     # if expression is incorrect this will fail
-    dummy.filter(exprs)
+    try:
+        dummy.query(exprs)
+    except Exception as e:
+        raise click.BadParameter(f'--custom-filter issue: {str(e)}')
+
+
+def set_default_kl_divergence(ctx, param, val):
+    if val is None:
+        win_size = ctx.params['window_size']
+        if win_size == 1:
+            val = 0.5
+        else:
+            val = 2
+        logger.warn(f'Default min kl divergence set to {val} to match '
+                    f'window size {win_size}')
+    return val
 
 
 @click.command()
@@ -427,7 +436,8 @@ def check_custom_filter_exprs(exprs, columns=RESULTS_COLUMNS):
               type=click.Choice(['none', 'undersample', 'oversample']),
               default='none')
 @click.option('-q', '--outlier-quantile', required=False, default=0.95)
-@click.option('-k', '--min-kl-divergence', required=False, default=0.5)
+@click.option('-k', '--min-kl-divergence', required=False,
+              default=None, callback=set_default_kl_divergence)
 @click.option('-f', '--fdr-threshold', required=False, default=0.05)
 @click.option('--custom-filter', required=False, default=None)
 @click.option('-p', '--processes', required=False,

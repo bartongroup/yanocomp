@@ -398,7 +398,7 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
     logger.info(f'Writing output to {os.path.abspath(output_bed_fn)}')
     with open(output_bed_fn, 'w') as bed:
         for record in sig_res.itertuples(index=False):
-            (chrom, pos, gene_id, kmer, strand,
+            (chrom, pos, gene_id, strand, kmer,
              log_odds, pval, fdr, c_fm, t_fm,
              g_stat, hom_g_stat,
              c_mu, c_std, d_mu, d_std, kld) = record
