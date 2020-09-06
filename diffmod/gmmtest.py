@@ -251,6 +251,31 @@ def iter_transcripts(cntrl, treat):
                    treat.loc[{'read_idx': t_mask}])
 
 
+def get_valid_pos(events, min_depth):
+    depth = (events['mean'].notnull()
+                           .groupby('replicate')
+                           .sum('read_idx'))
+    at_min_depth = (depth >= min_depth).all('replicate').values
+    valid_pos = events['pos'].values[at_min_depth]
+    return valid_pos
+
+
+def get_valid_windows(valid_pos, window_size=3):
+    w = window_size // 2
+    for pos in valid_pos:
+        win = np.arange(pos - w, pos + w + 1)
+        if valid_pos.issuperset(win):
+            yield pos, win
+
+
+def get_cntrl_treat_valid_pos(cntrl_events, treat_events,
+                              min_depth=5, window_size=3):
+    cntrl_valid_pos = get_valid_pos(cntrl_events, min_depth)
+    treat_valid_pos = get_valid_pos(treat_events, min_depth)
+    valid_pos = set(cntrl_valid_pos).intersection(treat_valid_pos)
+    yield from get_valid_windows(valid_pos, window_size=3)       
+
+
 def iter_positions(gene_id, cntrl_datasets, treat_datasets,
                    test_level='gene', window_size=3, min_depth=5):
     '''
@@ -269,9 +294,13 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
     chrom, strand = load_gene_attrs(
         gene_id, cntrl_datasets
     )
-    valid_pos = set(cntrl_events.pos.values).intersection(treat_events.pos.values)
-    for pos in valid_pos:
-        win = np.arange(pos - window_size // 2, pos + window_size // 2 + 1)
+    # first attempt to filter out any positions below the min_depth threshold
+    # we still need to check again later, this just prevents costly indexing...
+    valid_pos = get_cntrl_treat_valid_pos(
+        cntrl_events, treat_events,
+        min_depth=min_depth
+    )
+    for pos, win in valid_pos:
         try:
             cntrl_pos_events = index_pos_range(cntrl_events, win)
             treat_pos_events = index_pos_range(treat_events, win)
@@ -285,7 +314,6 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
                 if test_depth(cntrl_tpos_events, treat_tpos_events, min_depth):
                     yield (chrom, pos, transcript_id, strand,
                            cntrl_tpos_events, treat_tpos_events)
-
         elif test_depth(cntrl_pos_events, treat_pos_events, min_depth):
             yield chrom, pos, gene_id, strand, cntrl_pos_events, treat_pos_events
 
@@ -348,24 +376,27 @@ def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
     logger.info(
         f'{len(gene_ids):,} genes to be processed on {processes} workers'
     )
-    with mp.Pool(processes) as pool:
-        _test_chunk = partial(
-            test_chunk,
-            cntrl_fns=cntrl_fns,
-            treat_fns=treat_fns,
-            model_fn=model_fn,
-            test_level=test_level,
-            window_size=window_size,
-            min_depth=min_depth,
-            max_gmm_fit_depth=max_gmm_fit_depth,
-            balance_method=balance_method,
-            refit_quantile=refit_quantile,
-            min_kld=min_kld,
-            p_val_threshold=p_val_threshold
-        )
-        res = []
-        for chunk_res in pool.imap_unordered(_test_chunk, gene_id_chunks):
-            res += chunk_res
+    _test_chunk = partial(
+        test_chunk,
+        cntrl_fns=cntrl_fns,
+        treat_fns=treat_fns,
+        model_fn=model_fn,
+        test_level=test_level,
+        window_size=window_size,
+        min_depth=min_depth,
+        max_gmm_fit_depth=max_gmm_fit_depth,
+        balance_method=balance_method,
+        refit_quantile=refit_quantile,
+        min_kld=min_kld,
+        p_val_threshold=p_val_threshold
+    )
+    if processes > 1:
+        with mp.Pool(processes) as pool:
+            res = []
+            for chunk_res in pool.imap_unordered(_test_chunk, gene_id_chunks):
+                res += chunk_res
+    else:
+        res = _test_chunk(gene_id_chunks[0])
 
     logger.info(f'Complete. Tested {len(res):,} positions')
     res = pd.DataFrame(res, columns=RESULTS_COLUMNS)
@@ -399,7 +430,8 @@ def check_custom_filter_exprs(exprs, columns=RESULTS_COLUMNS):
 @click.option('-k', '--min-kl-divergence', required=False, default=0.5)
 @click.option('-f', '--fdr-threshold', required=False, default=0.05)
 @click.option('--custom-filter', required=False, default=None)
-@click.option('-p', '--processes', required=False, default=1)
+@click.option('-p', '--processes', required=False,
+              default=1, type=click.IntRange(1, None))
 def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
              test_level, window_size, min_depth, max_gmm_fit_depth,
              class_balance_method, outlier_quantile, min_kl_divergence,
