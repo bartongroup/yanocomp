@@ -20,7 +20,6 @@ setup(
         'numpy',
         'scipy',
         'pandas>=1.1',
-        'numexpr',
         'statsmodels',
         'pomegranate>=0.13',
         'scikit-learn',

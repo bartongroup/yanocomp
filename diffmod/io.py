@@ -259,39 +259,7 @@ def load_gene_kmers(gene_id, datasets):
             np.dtype([('pos', np.uint32), ('kmer', 'U5')])
         )
         kmers.update(dict(k))
-    return kmers
-
-
-def load_gene_events(gene_id, datasets,
-                     load_kmers=False,
-                     load_transcript_ids=False,
-                     load_read_ids=False):
-    '''
-    Extract the event alignment table for a given gene from a
-    list of HDF5 file objects
-    '''
-    gene_events = []
-    for i, d in enumerate(datasets, 1):
-        # read full dataset from disk
-        e = pd.DataFrame(d[f'{gene_id}/events'][:])
-        # convert f16 to f64
-        e['mean'] = e['mean'].astype(np.float64)
-        e['duration'] = np.log10(e['duration'].astype(np.float64))
-        if load_transcript_ids:
-            t = d[f'{gene_id}/transcript_ids'][:]
-            t = {i: t_id for i, t_id in enumerate(t)}
-            e['transcript_idx'] = e.transcript_idx.map(t)
-        if load_read_ids:
-            r = d[f'{gene_id}/read_ids'][:].astype('U32')
-            r = {i: r_id for i, r_id in enumerate(r)}
-            e['read_idx'] = e.read_idx.map(r)
-        e['replicate'] = i
-        gene_events.append(e)
-    gene_events = pd.concat(gene_events)
-    if load_kmers:
-        kmers = load_gene_kmers(gene_id, datasets)
-        gene_events['kmer'] = gene_events.pos.map(kmers)
-    return gene_events
+    return pd.Series(kmers)
 
 
 def load_gene_attrs(gene_id, datasets):
@@ -304,6 +272,57 @@ def load_gene_attrs(gene_id, datasets):
     chrom = g.attrs['chrom']
     strand = g.attrs['strand']
     return chrom, strand
+
+
+def load_gene_events(gene_id, datasets,
+                     by_transcript_ids=False):
+    '''
+    Extract the event alignment table for a given gene from a
+    list of HDF5 file objects
+    '''
+    if not by_transcript_ids:
+        gene_events = []
+    else:
+        gene_events = defaultdict(list)
+    for rep, d in enumerate(datasets, 1):
+        # read full dataset from disk
+        e = pd.DataFrame(d[f'{gene_id}/events'][:])
+        e.drop_duplicates(['read_idx', 'pos'], keep='first', inplace=True)
+        # convert f16 to f64
+        e['mean'] = e['mean'].astype(np.float64, copy=False)
+        e['duration'] = np.log10(e['duration'].astype(np.float64, copy=False))
+        e['transcript_idx'] = e['transcript_idx'].astype('category', copy=False)
+        # even when secondary alignments are switched off minimap2
+        # can produce some primary multimappers which need to be
+        # deduplicated
+
+        r_ids = d[f'{gene_id}/read_ids'][:].astype('U32')
+        e['read_idx'] = e['read_idx'].map(dict(enumerate(r_ids)))
+        e['replicate'] = rep
+        e.set_index(['pos', 'read_idx', 'replicate'], inplace=True)
+
+        if by_transcript_ids:
+            t_ids = d[f'{gene_id}/transcript_ids'][:]
+            e['transcript_idx'].cat.rename_categories(
+                dict(enumerate(t_ids)),
+                inplace=True
+            )
+            for transcript_id, group in e.groupby('transcript_idx'):
+                group = group[['mean', 'duration']].unstack(0)
+                gene_events[transcript_id].append(group)
+        else:
+            e = e[['mean', 'duration']].unstack(0)
+            gene_events.append(e)
+
+    if by_transcript_ids:
+        gene_events = {
+            t_id: pd.concat(e, sort=False)[['mean', 'duration']]
+            for t_id, e in gene_events.items()
+        }
+    else:
+        gene_events = pd.concat(gene_events, sort=False)[['mean', 'duration']]
+    
+    return gene_events
 
 
 # functions for loading/saving output from `priors` and `gmmtest` commands
@@ -334,8 +353,8 @@ def load_model_priors(model_fn=None):
     m = pd.read_csv(
         model_fn, sep='\t', comment='#', index_col='kmer'
     )
-    m = m[['current_mean', 'current_std', 'dwell_mean', 'dwell_std']]
-    return m.T.to_dict(orient='list')
+    m = m[['current_mean', 'dwell_mean', 'current_std', 'dwell_std']]
+    return m.transpose()
 
 
 def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
@@ -357,7 +376,7 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
     logger.info(f'Writing output to {os.path.abspath(output_bed_fn)}')
     with open(output_bed_fn, 'w') as bed:
         for record in sig_res.itertuples(index=False):
-            (chrom, pos, gene_id, kmer, strand,
+            (chrom, pos, gene_id, strand, kmer,
              log_odds, pval, fdr, c_fm, t_fm,
              g_stat, hom_g_stat,
              c_mu, c_std, d_mu, d_std, kld) = record
