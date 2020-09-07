@@ -9,7 +9,6 @@ from collections import defaultdict, OrderedDict
 
 import numpy as np
 import pandas as pd
-import xarray as xr
 import h5py as h5
 
 logger = logging.getLogger('diffmod')
@@ -249,24 +248,6 @@ def get_shared_keys(hdf5_handles):
     return list(genes)
 
 
-def build_xr_dataset(events, replicates, kmers, transcripts=None):
-    # build dense 2D xarray dataset with dims read_idx, pos
-    # many positions will be nans as not all reads cover all pos
-    coords = {
-        'replicate': ('read_idx', replicates),
-        'kmer': ('pos', kmers),
-    }
-    if transcripts is not None:
-        coords['transcript_idx'] = ('read_idx', transcripts)
-
-    events = events.pivot('read_idx', 'pos', ['mean', 'duration'])
-    events = xr.Dataset(
-        {'mean': events['mean'], 'duration': events['duration']},
-        coords=coords,
-    )
-    return events
-
-
 def load_gene_kmers(gene_id, datasets):
     '''
     Get all recorded kmers from the different datasets
@@ -278,7 +259,7 @@ def load_gene_kmers(gene_id, datasets):
             np.dtype([('pos', np.uint32), ('kmer', 'U5')])
         )
         kmers.update(dict(k))
-    return pd.Series(kmers).sort_index()
+    return pd.Series(kmers)
 
 
 def load_gene_attrs(gene_id, datasets):
@@ -300,11 +281,6 @@ def load_gene_events(gene_id, datasets,
     list of HDF5 file objects
     '''
     gene_events = []
-    replicates = {}
-    if load_transcript_ids:
-        transcripts = {}
-    else:
-        transcripts = None
     for rep, d in enumerate(datasets, 1):
         # read full dataset from disk
         e = pd.DataFrame(d[f'{gene_id}/events'][:])
@@ -323,7 +299,7 @@ def load_gene_events(gene_id, datasets,
             dict(enumerate(r_ids)),
             inplace=True
         )
-        replicates.update({r_id: rep for r_id in r_ids})
+        e['replicate'] = rep
 
         if load_transcript_ids:
             t_ids = d[f'{gene_id}/transcript_ids'][:]
@@ -331,21 +307,13 @@ def load_gene_events(gene_id, datasets,
                 dict(enumerate(t_ids)),
                 inplace=True
             )
-            transcripts.update(
-                dict(e[['read_idx', 'transcript_idx']].values)
-            )
         gene_events.append(e)
 
-    replicates = pd.Series(replicates).sort_index()
-    if transcripts is not None:
-        transcripts = pd.Series(transcripts).sort_index()
     gene_events = pd.concat(gene_events)
-    kmers = load_gene_kmers(gene_id, datasets)
-    gene_events = build_xr_dataset(
-        gene_events, replicates,
-        kmers, transcripts
-    )
+    gene_events.set_index(['pos', 'read_idx', 'replicate'], inplace=True)
+    gene_events.sort_index(level='pos', inplace=True)
     return gene_events
+
 
 # functions for loading/saving output from `priors` and `gmmtest` commands
 
