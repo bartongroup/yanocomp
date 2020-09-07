@@ -275,43 +275,53 @@ def load_gene_attrs(gene_id, datasets):
 
 
 def load_gene_events(gene_id, datasets,
-                     load_transcript_ids=False):
+                     by_transcript_ids=False):
     '''
     Extract the event alignment table for a given gene from a
     list of HDF5 file objects
     '''
-    gene_events = []
+    if not by_transcript_ids:
+        gene_events = []
+    else:
+        gene_events = defaultdict(list)
     for rep, d in enumerate(datasets, 1):
         # read full dataset from disk
         e = pd.DataFrame(d[f'{gene_id}/events'][:])
+        e.drop_duplicates(['read_idx', 'pos'], keep='first', inplace=True)
         # convert f16 to f64
-        e['mean'] = e['mean'].astype(np.float64)
-        e['duration'] = np.log10(e['duration'].astype(np.float64))
-        e['read_idx'] = e['read_idx'].astype('category')
-        e['transcript_idx'] = e['transcript_idx'].astype('category')
+        e['mean'] = e['mean'].astype(np.float64, copy=False)
+        e['duration'] = np.log10(e['duration'].astype(np.float64, copy=False))
+        e['transcript_idx'] = e['transcript_idx'].astype('category', copy=False)
         # even when secondary alignments are switched off minimap2
         # can produce some primary multimappers which need to be
         # deduplicated
-        e.drop_duplicates(['read_idx', 'pos'], keep='first', inplace=True)
 
         r_ids = d[f'{gene_id}/read_ids'][:].astype('U32')
-        e['read_idx'].cat.rename_categories(
-            dict(enumerate(r_ids)),
-            inplace=True
-        )
+        e['read_idx'] = e['read_idx'].map(dict(enumerate(r_ids)))
         e['replicate'] = rep
+        e.set_index(['pos', 'read_idx', 'replicate'], inplace=True)
 
-        if load_transcript_ids:
+        if by_transcript_ids:
             t_ids = d[f'{gene_id}/transcript_ids'][:]
             e['transcript_idx'].cat.rename_categories(
                 dict(enumerate(t_ids)),
                 inplace=True
             )
-        gene_events.append(e)
+            for transcript_id, group in e.groupby('transcript_idx'):
+                group = group[['mean', 'duration']].unstack(0)
+                gene_events[transcript_id].append(group)
+        else:
+            e = e[['mean', 'duration']].unstack(0)
+            gene_events.append(e)
 
-    gene_events = pd.concat(gene_events)
-    gene_events.set_index(['pos', 'read_idx', 'replicate'], inplace=True)
-    gene_events.sort_index(level='pos', inplace=True)
+    if by_transcript_ids:
+        gene_events = {
+            t_id: pd.concat(e, sort=False)[['mean', 'duration']]
+            for t_id, e in gene_events.items()
+        }
+    else:
+        gene_events = pd.concat(gene_events, sort=False)[['mean', 'duration']]
+    
     return gene_events
 
 

@@ -215,8 +215,10 @@ def position_stats(cntrl, treat, kmers,
 
 
 def get_valid_pos(events, min_depth):
-    depth = events.groupby(['pos', 'replicate'], sort=False).size()
-    at_min_depth = (depth >= min_depth).all(level='pos')
+    depth = (events['mean'].notnull()
+                           .groupby('replicate')
+                           .sum())
+    at_min_depth = (depth >= min_depth).all(0)
     valid_pos = at_min_depth.loc[at_min_depth].index.values
     return set(valid_pos)
 
@@ -238,8 +240,7 @@ def get_cntrl_treat_valid_pos(cntrl_events, treat_events,
 
 
 def index_pos_range(events, win):
-    events = events.loc[win, ['mean', 'duration']]
-    events = events.unstack(level=0)
+    events = events.loc[:, pd.IndexSlice[:, win]]
     events = events.dropna(axis=0)
     return events
 
@@ -268,21 +269,6 @@ def create_positional_data(cntrl_events, treat_events, kmers,
                    cntrl_pos_events, treat_pos_events)
 
 
-def iter_transcripts(cntrl, treat):
-    cntrl_transcripts = set(cntrl['transcript_idx'].values)
-    treat_transcripts = set(treat['transcript_idx'].values)
-    if (len(cntrl_transcripts) == 1) and (cntrl_transcripts == treat_transcripts):
-        yield cntrl_transcripts.pop(), cntrl, treat
-    else:
-        transcript_ids = cntrl_transcripts.intersection(treat_transcripts)
-        cntrl_grouped = dict(tuple(cntrl.groupby('transcript_idx')))
-        treat_grouped = dict(tuple(treat.groupby('transcript_idx')))
-        for transcript_id in transcript_ids:
-            yield (transcript_id,
-                   cntrl_grouped[transcript_id],
-                   treat_grouped[transcript_id])
-
-
 def iter_positions(gene_id, cntrl_datasets, treat_datasets,
                    test_level='gene', window_size=3, min_depth=5):
     '''
@@ -292,11 +278,11 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
     by_transcript = test_level == 'transcript'
     cntrl_events = load_gene_events(
         gene_id, cntrl_datasets,
-        load_transcript_ids=by_transcript
+        by_transcript_ids=by_transcript
     )
     treat_events = load_gene_events(
         gene_id, treat_datasets,
-        load_transcript_ids=by_transcript
+        by_transcript_ids=by_transcript
     )
     kmers = load_gene_kmers(
         gene_id, cntrl_datasets + treat_datasets
@@ -305,11 +291,13 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
         gene_id, cntrl_datasets
     )
     if by_transcript:
-        for transcript_id, cntrl_t_events, treat_t_events in iter_transcripts(
-                cntrl_events, treat_events):
+        # events are dicts of dataframes
+        valid_transcripts = set(cntrl_events).intersection(treat_events)
+        for transcript_id in valid_transcripts:
             yield from create_positional_data(
-                cntrl_t_events, treat_t_events, kmers,
-                chrom, transcript_id, strand,
+                cntrl_events[transcript_id],
+                treat_events[transcript_id], 
+                kmers, chrom, transcript_id, strand,
                 min_depth=min_depth
             )
     else:
@@ -410,12 +398,13 @@ def check_custom_filter_exprs(ctx, param, exprs):
     '''
     checks filter expressions for pandas dataframes using dummy dataframe
     '''
-    dummy = pd.DataFrame([], columns=RESULTS_COLUMNS)
-    # if expression is incorrect this will fail
-    try:
-        dummy.query(exprs)
-    except Exception as e:
-        raise click.BadParameter(f'--custom-filter issue: {str(e)}')
+    if exprs is not None:
+        dummy = pd.DataFrame([], columns=RESULTS_COLUMNS)
+        # if expression is incorrect this will fail
+        try:
+            dummy.query(exprs)
+        except Exception as e:
+            raise click.BadParameter(f'--custom-filter issue: {str(e)}')
 
 
 def set_default_kl_divergence(ctx, param, val):
