@@ -3,6 +3,7 @@ import sys
 import re
 import gzip
 import csv
+import json
 import logging
 from contextlib import contextmanager
 from collections import defaultdict, OrderedDict
@@ -362,20 +363,10 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
     '''
     write main results to bed file
     '''
-    sig_res = res.query(f'fdr < {fdr_threshold}')
-    logger.info(
-        f'{len(sig_res):,} positions significant at '
-        f'{fdr_threshold * 100:.0f}% level'
-    )
-    if custom_filter is not None:
-        sig_res = sig_res.query(custom_filter)
-        logger.info(
-            f'{len(sig_res):,} positions pass filter "{custom_filter}"'
-        )
-    sig_res = sig_res.sort_values(by=['chrom', 'pos'])
+    res = res.sort_values(by=['chrom', 'pos'])
     logger.info(f'Writing output to {os.path.abspath(output_bed_fn)}')
     with open(output_bed_fn, 'w') as bed:
-        for record in sig_res.itertuples(index=False):
+        for record in res.itertuples(index=False):
             (chrom, pos, gene_id, strand, kmer,
              log_odds, pval, fdr, c_fm, t_fm,
              g_stat, hom_g_stat,
@@ -391,3 +382,19 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
                 f'{d_mu:.2f}\t{d_std:.2f}\t{kld:.2f}\n'
             )
             bed.write(bed_record)
+
+
+def save_sm_preds(sm_preds, cntrl_hdf5_fns, treat_hdf5_fns, output_json_fn):
+    sm_preds_json = {
+        'input_fns': {
+            'cntrl': dict(enumerate(cntrl_hdf5_fns)),
+            'treat': dict(enumerate(treat_hdf5_fns)),
+        },
+        'single_molecule_predictions': sm_preds
+    }
+    if os.path.splitext(output_json_fn)[1] == '.gz':
+        handle = gzip.open(output_json_fn, 'wt', encoding="ascii")
+    else:
+        handle = open(output_json_fn, 'w')
+    json.dump(sm_preds_json, handle)
+    handle.close()

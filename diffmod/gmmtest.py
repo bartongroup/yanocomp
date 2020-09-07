@@ -13,7 +13,7 @@ import click
 from .io import (
     hdf5_list, get_shared_keys, load_model_priors,
     load_gene_kmers, load_gene_events, load_gene_attrs,
-    save_gmmtest_results,
+    save_gmmtest_results, save_sm_preds
 )
 
 logger = logging.getLogger('diffmod')
@@ -104,7 +104,7 @@ def gmm_predictions(gmm, events, pseudocount=np.finfo('f').tiny):
     log_prob = np.log2(probs.sum(0) + pseudocount)
     log_ratio = log_prob[1] - log_prob[0]
     frac_mod = preds.sum() / len(preds)
-    return preds, frac_mod, log_ratio
+    return preds, probs[:, 1], frac_mod, log_ratio
 
 
 def crosstab_preds_per_replicate(preds, replicates):
@@ -154,6 +154,21 @@ def gmm_g_test(cntrl_preds, cntrl_reps,
     return het_g, hom_g, p_val
 
 
+def format_sm_preds(sm_preds, index):
+    reps = index.get_level_values('replicate').values
+    read_ids = index.get_level_values('read_idx').values
+    sm_preds_dict = {}
+    for rep, read_id, p in zip(reps, read_ids, sm_preds):
+        rep = int(rep)
+        p = float(p)
+        try:
+            sm_preds_dict[rep][read_id] = p
+        except KeyError:
+            sm_preds_dict[rep] = {}
+            sm_preds_dict[rep][read_id] = p
+    return sm_preds_dict
+
+
 def position_stats(cntrl, treat, kmers,
                    max_gmm_fit_depth=10_000,
                    balance_method=None,
@@ -193,8 +208,12 @@ def position_stats(cntrl, treat, kmers,
         # if the KL divergence of the distributions is too small we stop here
         if kld >= min_kld:
             pass_kld = True
-            cntrl_preds, cntrl_frac_mod, cntrl_lr = gmm_predictions(gmm, cntrl_fit_data)
-            treat_preds, treat_frac_mod, treat_lr = gmm_predictions(gmm, treat_fit_data)
+            cntrl_preds, cntrl_probs, cntrl_frac_mod, cntrl_lr = gmm_predictions(
+                gmm, cntrl_fit_data
+            )
+            treat_preds, treat_probs, treat_frac_mod, treat_lr = gmm_predictions(
+                gmm, treat_fit_data
+            )
             log_odds = treat_lr - cntrl_lr
             g_stat, hom_g_stat, p_val = gmm_g_test(
                 cntrl_preds, cntrl.index.get_level_values('replicate').values,
@@ -203,15 +222,23 @@ def position_stats(cntrl, treat, kmers,
             )
     if pass_kld & pass_ttest:
         kmer = kmers[centre]
+        # sort out the single molecule predictions
+        if p_val < p_val_threshold:
+            sm_preds = {
+                'cntrl' : format_sm_preds(cntrl_probs, cntrl.index),
+                'treat' : format_sm_preds(treat_probs, treat.index),
+            }
+        else:
+            sm_preds = None
         return [
             True, kmer, log_odds, p_val, 1,       # placeholder for fdr
             cntrl_frac_mod, treat_frac_mod,
             g_stat, hom_g_stat,
             current_mean, current_std,
             dwell_mean, dwell_std, kld
-        ]
+        ], sm_preds
     else:
-        return [False, ]
+        return [False, ], None
 
 
 def get_valid_pos(events, min_depth):
@@ -252,8 +279,7 @@ def test_depth(cntrl_pos_events, treat_pos_events, min_depth=10):
             (treat_depth >= min_depth).all())
 
 
-def create_positional_data(cntrl_events, treat_events, kmers,
-                           chrom, locus_id, strand, min_depth=5):
+def create_positional_data(cntrl_events, treat_events, kmers, locus_id, min_depth=5):
     # first attempt to filter out any positions below the min_depth threshold
     # we still need to check again later, this just prevents costly indexing ops...
     valid_pos = get_cntrl_treat_valid_pos(
@@ -265,8 +291,7 @@ def create_positional_data(cntrl_events, treat_events, kmers,
         treat_pos_events = index_pos_range(treat_events, win)
         if test_depth(cntrl_pos_events, treat_pos_events, min_depth):
             pos_kmers = kmers.loc[win].values
-            yield (chrom, pos, locus_id, strand, pos_kmers,
-                   cntrl_pos_events, treat_pos_events)
+            yield (pos, locus_id, pos_kmers, cntrl_pos_events, treat_pos_events)
 
 
 def iter_positions(gene_id, cntrl_datasets, treat_datasets,
@@ -287,9 +312,6 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
     kmers = load_gene_kmers(
         gene_id, cntrl_datasets + treat_datasets
     )
-    chrom, strand = load_gene_attrs(
-        gene_id, cntrl_datasets
-    )
     if by_transcript:
         # events are dicts of dataframes
         valid_transcripts = set(cntrl_events).intersection(treat_events)
@@ -297,14 +319,13 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
             yield from create_positional_data(
                 cntrl_events[transcript_id],
                 treat_events[transcript_id], 
-                kmers, chrom, transcript_id, strand,
+                kmers, transcript_id,
                 min_depth=min_depth
             )
     else:
         yield from create_positional_data(
             cntrl_events, treat_events, kmers,
-            chrom, gene_id, strand,
-            min_depth=min_depth
+            gene_id, min_depth=min_depth
         )
 
 
@@ -317,17 +338,19 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
     '''
     model = load_model_priors(model_fn)
     chunk_res = []
+    chunk_sm_preds = {}
     with hdf5_list(cntrl_fns) as cntrl_h5, hdf5_list(treat_fns) as treat_h5:
         for gene_id in gene_ids:
+            chrom, strand = load_gene_attrs(gene_id, cntrl_h5)
             pos_iter = iter_positions(
                 gene_id, cntrl_h5, treat_h5,
                 test_level=test_level,
                 window_size=window_size,
                 min_depth=min_depth
             )
-            for chrom, pos, feature_id, strand, kmer, cntrl, treat in pos_iter:
-                r = position_stats(
-                    cntrl, treat, kmer,
+            for pos, feature_id, kmers, cntrl, treat in pos_iter:
+                r, sm = position_stats(
+                    cntrl, treat, kmers,
                     max_gmm_fit_depth=max_gmm_fit_depth,
                     balance_method=balance_method,
                     refit_quantile=refit_quantile,
@@ -338,11 +361,18 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                 if r[0]:
                     r = [chrom, pos, feature_id, strand] + r[1:]
                     chunk_res.append(r)
-    return chunk_res
+                    if sm is not None:
+                        pos = int(pos)
+                        try:
+                            chunk_sm_preds[feature_id][pos] = sm
+                        except KeyError:
+                            chunk_sm_preds[feature_id] = {}
+                            chunk_sm_preds[feature_id][pos] = sm
+    return chunk_res, chunk_sm_preds
 
 
 RESULTS_COLUMNS = [
-    'chrom', 'pos', 'gene_id', 'kmer', 'strand',
+    'chrom', 'pos', 'gene_id', 'strand', 'kmer',
     'log_odds', 'p_val', 'fdr',
     'cntrl_frac_mod', 'treat_frac_mod',
     'g_stat', 'hom_g_stat',
@@ -383,15 +413,40 @@ def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
     if processes > 1:
         with mp.Pool(processes) as pool:
             res = []
-            for chunk_res in pool.imap_unordered(_test_chunk, gene_id_chunks):
+            sm_preds = {}
+            for chunk_res, chunk_sm_preds in pool.imap_unordered(
+                    _test_chunk, gene_id_chunks):
                 res += chunk_res
+                sm_preds.update(chunk_sm_preds)
     else:
-        res = _test_chunk(gene_id_chunks[0])
+        res, sm_preds = _test_chunk(gene_id_chunks[0])
 
     logger.info(f'Complete. Tested {len(res):,} positions')
     res = pd.DataFrame(res, columns=RESULTS_COLUMNS)
     _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
-    return res
+    return res, sm_preds
+
+
+def filter_results(res, sm_preds, fdr_threshold, custom_filter):
+    sig_res = res.query(f'fdr < {fdr_threshold}')
+    logger.info(
+        f'{len(sig_res):,} positions significant at '
+        f'{fdr_threshold * 100:.0f}% level'
+    )
+    if custom_filter is not None:
+        sig_res = sig_res.query(custom_filter)
+        logger.info(
+            f'{len(sig_res):,} positions pass filter "{custom_filter}"'
+        )
+    sig_sm_preds = {}
+    for gene_id, pos in sig_res[['gene_id', 'pos']].itertuples(index=False):
+        p = sm_preds[gene_id][pos]
+        try:
+            sig_sm_preds[gene_id][pos] = p
+        except KeyError:
+            sig_sm_preds[gene_id] = {}
+            sig_sm_preds[gene_id][pos] = p
+    return sig_res, sig_sm_preds
 
 
 def check_custom_filter_exprs(ctx, param, exprs):
@@ -423,6 +478,7 @@ def set_default_kl_divergence(ctx, param, val):
 @click.option('-c', '--cntrl-hdf5-fns', required=True, multiple=True)
 @click.option('-t', '--treat-hdf5-fns', required=True, multiple=True)
 @click.option('-o', '--output-bed-fn', required=True)
+@click.option('-s', '--output-sm-preds-fn', required=False, default=None)
 @click.option('-m', '--prior-model-fn', required=False, default=None)
 @click.option('--test-level', required=False, default='gene',
               type=click.Choice(['gene', 'transcript']))
@@ -441,10 +497,11 @@ def set_default_kl_divergence(ctx, param, val):
 @click.option('-p', '--processes', required=False,
               default=1, type=click.IntRange(1, None))
 @click.option('--test-gene', required=False, default=None, hidden=True)
-def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
-             test_level, window_size, min_depth, max_gmm_fit_depth,
-             class_balance_method, outlier_quantile, min_kl_divergence,
-             fdr_threshold, custom_filter, processes, test_gene):
+def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, output_sm_preds_fn,
+             prior_model_fn, test_level, window_size, min_depth,
+             max_gmm_fit_depth, class_balance_method, outlier_quantile,
+             min_kl_divergence, fdr_threshold, custom_filter,
+             processes, test_gene):
     '''
     Differential RNA modifications using nanopore DRS signal level data
     '''
@@ -453,7 +510,7 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
         f'datasets and {len(treat_hdf5_fns):,} treatment datasets'
     )
     if test_gene is None:
-        res = parallel_test(
+        res, sm_preds = parallel_test(
             cntrl_hdf5_fns, treat_hdf5_fns,
             model_fn=prior_model_fn,
             test_level=test_level,
@@ -470,7 +527,7 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
         logger.info(
             f'Testing single gene {test_gene}'
         )
-        res = test_chunk(
+        res, sm_preds = test_chunk(
             [test_gene],
             cntrl_hdf5_fns, treat_hdf5_fns,
             model_fn=prior_model_fn,
@@ -485,10 +542,20 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, prior_model_fn,
         )
         res = pd.DataFrame(res, columns=RESULTS_COLUMNS)
         _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
+
+    res, sm_preds = filter_results(
+        res, sm_preds, fdr_threshold, custom_filter
+    )
+
     save_gmmtest_results(
         res, output_bed_fn,
-        fdr_threshold, custom_filter
     )
+    if output_sm_preds_fn is not None:
+        save_sm_preds(
+            sm_preds,
+            cntrl_hdf5_fns, treat_hdf5_fns,
+            output_sm_preds_fn,
+        )
 
 
 if __name__ == '__main__':
