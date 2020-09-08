@@ -291,7 +291,6 @@ def load_gene_events(gene_id, datasets,
         e.drop_duplicates(['read_idx', 'pos'], keep='first', inplace=True)
         # convert f16 to f64
         e['mean'] = e['mean'].astype(np.float64, copy=False)
-        e['duration'] = np.log10(e['duration'].astype(np.float64, copy=False))
         e['transcript_idx'] = e['transcript_idx'].astype('category', copy=False)
         # even when secondary alignments are switched off minimap2
         # can produce some primary multimappers which need to be
@@ -312,16 +311,16 @@ def load_gene_events(gene_id, datasets,
                 group = group[['mean', 'duration']].unstack(0)
                 gene_events[transcript_id].append(group)
         else:
-            e = e[['mean', 'duration']].unstack(0)
+            e = e['mean'].unstack(0)
             gene_events.append(e)
 
     if by_transcript_ids:
         gene_events = {
-            t_id: pd.concat(e, sort=False)[['mean', 'duration']]
+            t_id: pd.concat(e, sort=False)
             for t_id, e in gene_events.items()
         }
     else:
-        gene_events = pd.concat(gene_events, sort=False)[['mean', 'duration']]
+        gene_events = pd.concat(gene_events, sort=False)
     
     return gene_events
 
@@ -354,8 +353,8 @@ def load_model_priors(model_fn=None):
     m = pd.read_csv(
         model_fn, sep='\t', comment='#', index_col='kmer'
     )
-    m = m[['current_mean', 'dwell_mean', 'current_std', 'dwell_std']]
-    return m.transpose()
+    m = m[['current_mean', 'current_std']]
+    return m
 
 
 def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
@@ -370,7 +369,7 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
             (chrom, pos, gene_id, strand, kmer,
              log_odds, pval, fdr, c_fm, t_fm,
              g_stat, hom_g_stat,
-             c_mu, c_std, d_mu, d_std, kld) = record
+             c_mu, c_std, kld) = record
             score = int(round(min(- np.log10(fdr), 100)))
             bed_record = (
                 f'{chrom:s}\t{pos - 2:d}\t{pos + 3:d}\t'
@@ -378,8 +377,7 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
                 f'{log_odds:.2f}\t{pval:.2g}\t{fdr:.2g}\t'
                 f'{c_fm:.2f}\t{t_fm:.2f}\t'
                 f'{g_stat:.2f}\t{hom_g_stat:.2f}\t'
-                f'{c_mu:.2f}\t{c_std:.2f}\t'
-                f'{d_mu:.2f}\t{d_std:.2f}\t{kld:.2f}\n'
+                f'{c_mu:.2f}\t{c_std:.2f}\t{kld:.2f}\n'
             )
             bed.write(bed_record)
 
