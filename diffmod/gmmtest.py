@@ -225,8 +225,7 @@ def position_stats(cntrl, treat, kmers,
             True, kmer, log_odds, p_val, 1,       # placeholder for fdr
             cntrl_frac_mod, treat_frac_mod,
             g_stat, hom_g_stat,
-            current_mean, current_std,
-            np.nan, np.nan, kld
+            current_mean, current_std, kld
         ], sm_preds
     else:
         return [False, ], None
@@ -258,7 +257,6 @@ def get_cntrl_treat_valid_pos(cntrl_events, treat_events,
 
 
 def index_pos_range(events, win):
-    #events = events.loc[:, pd.IndexSlice[:, win]]
     events = events.loc[:, win]
     events = events.dropna(axis=0)
     return events

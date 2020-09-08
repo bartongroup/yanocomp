@@ -291,7 +291,6 @@ def load_gene_events(gene_id, datasets,
         e.drop_duplicates(['read_idx', 'pos'], keep='first', inplace=True)
         # convert f16 to f64
         e['mean'] = e['mean'].astype(np.float64, copy=False)
-        #e['duration'] = np.log10(e['duration'].astype(np.float64, copy=False))
         e['transcript_idx'] = e['transcript_idx'].astype('category', copy=False)
         # even when secondary alignments are switched off minimap2
         # can produce some primary multimappers which need to be
@@ -370,7 +369,7 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
             (chrom, pos, gene_id, strand, kmer,
              log_odds, pval, fdr, c_fm, t_fm,
              g_stat, hom_g_stat,
-             c_mu, c_std, d_mu, d_std, kld) = record
+             c_mu, c_std, kld) = record
             score = int(round(min(- np.log10(fdr), 100)))
             bed_record = (
                 f'{chrom:s}\t{pos - 2:d}\t{pos + 3:d}\t'
@@ -378,8 +377,7 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
                 f'{log_odds:.2f}\t{pval:.2g}\t{fdr:.2g}\t'
                 f'{c_fm:.2f}\t{t_fm:.2f}\t'
                 f'{g_stat:.2f}\t{hom_g_stat:.2f}\t'
-                f'{c_mu:.2f}\t{c_std:.2f}\t'
-                f'{d_mu:.2f}\t{d_std:.2f}\t{kld:.2f}\n'
+                f'{c_mu:.2f}\t{c_std:.2f}\t{kld:.2f}\n'
             )
             bed.write(bed_record)
 
