@@ -271,12 +271,14 @@ def test_depth(cntrl_pos_events, treat_pos_events, min_depth=10):
             (treat_depth >= min_depth).all())
 
 
-def create_positional_data(cntrl_events, treat_events, kmers, locus_id, min_depth=5):
+def create_positional_data(cntrl_events, treat_events, kmers, locus_id,
+                           min_depth=5, window_size=3):
     # first attempt to filter out any positions below the min_depth threshold
     # we still need to check again later, this just prevents costly indexing ops...
     valid_pos = get_cntrl_treat_valid_pos(
         cntrl_events, treat_events,
-        min_depth=min_depth
+        min_depth=min_depth,
+        window_size=window_size,
     )
     for pos, win in valid_pos:
         cntrl_pos_events = index_pos_range(cntrl_events, win)
@@ -312,12 +314,14 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
                 cntrl_events[transcript_id],
                 treat_events[transcript_id], 
                 kmers, transcript_id,
-                min_depth=min_depth
+                min_depth=min_depth,
+                window_size=window_size
             )
     else:
         yield from create_positional_data(
             cntrl_events, treat_events, kmers,
-            gene_id, min_depth=min_depth
+            gene_id, min_depth=min_depth,
+            window_size=window_size
         )
 
 
