@@ -370,8 +370,7 @@ RESULTS_COLUMNS = [
     'log_odds', 'p_val', 'fdr',
     'cntrl_frac_mod', 'treat_frac_mod',
     'g_stat', 'hom_g_stat',
-    'current_mu', 'current_std', 'dwell_mu', 'dwell_std',
-    'kl_divergence',
+    'current_mu', 'current_std', 'kl_divergence',
 ]
 
 
