@@ -291,7 +291,7 @@ def load_gene_events(gene_id, datasets,
         e.drop_duplicates(['read_idx', 'pos'], keep='first', inplace=True)
         # convert f16 to f64
         e['mean'] = e['mean'].astype(np.float64, copy=False)
-        e['duration'] = np.log10(e['duration'].astype(np.float64, copy=False))
+        #e['duration'] = np.log10(e['duration'].astype(np.float64, copy=False))
         e['transcript_idx'] = e['transcript_idx'].astype('category', copy=False)
         # even when secondary alignments are switched off minimap2
         # can produce some primary multimappers which need to be
@@ -312,16 +312,16 @@ def load_gene_events(gene_id, datasets,
                 group = group[['mean', 'duration']].unstack(0)
                 gene_events[transcript_id].append(group)
         else:
-            e = e[['mean', 'duration']].unstack(0)
+            e = e['mean'].unstack(0)
             gene_events.append(e)
 
     if by_transcript_ids:
         gene_events = {
-            t_id: pd.concat(e, sort=False)[['mean', 'duration']]
+            t_id: pd.concat(e, sort=False)
             for t_id, e in gene_events.items()
         }
     else:
-        gene_events = pd.concat(gene_events, sort=False)[['mean', 'duration']]
+        gene_events = pd.concat(gene_events, sort=False)
     
     return gene_events
 
@@ -354,8 +354,8 @@ def load_model_priors(model_fn=None):
     m = pd.read_csv(
         model_fn, sep='\t', comment='#', index_col='kmer'
     )
-    m = m[['current_mean', 'dwell_mean', 'current_std', 'dwell_std']]
-    return m.transpose()
+    m = m[['current_mean', 'current_std']]
+    return m
 
 
 def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,

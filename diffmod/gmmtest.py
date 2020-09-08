@@ -19,13 +19,6 @@ from .io import (
 logger = logging.getLogger('diffmod')
 
 
-def stack_mean_and_duration(events):
-    return np.concatenate(
-        [events['mean'].values, events['duration'].values],
-        axis=1
-    )
-
-
 def kl_divergence(mvg_1, mvg_2, n_samples=10_000):
     '''monte carlo simulated KL divergence'''
     X = mvg_1.sample(n_samples)
@@ -186,15 +179,14 @@ def position_stats(cntrl, treat, kmers,
     pass_ttest = False
     pass_kld = False
     _, tt_p_val = stats.ttest_ind(
-        cntrl['mean'].values[:, centre],
-        treat['mean'].values[:, centre],
+        cntrl.values[:, centre],
+        treat.values[:, centre],
         equal_var=False
     )
     # if there is we can perform the GMM fit and subsequent G test
     if tt_p_val < p_val_threshold:
         pass_ttest = True
-        expected_params = model.loc[:, kmers]
-        expected_params = expected_params.values.reshape(2, -1).T
+        expected_params = model.loc[kmers].values
         cntrl_fit_data = cntrl.values
         treat_fit_data = treat.values
         gmm, kld = fit_gmm(
@@ -204,7 +196,6 @@ def position_stats(cntrl, treat, kmers,
             refit_quantile
         )
         current_mean, current_std = gmm.distributions[1][centre].parameters
-        dwell_mean, dwell_std = gmm.distributions[1][window_size + centre].parameters
         # if the KL divergence of the distributions is too small we stop here
         if kld >= min_kld:
             pass_kld = True
@@ -235,16 +226,16 @@ def position_stats(cntrl, treat, kmers,
             cntrl_frac_mod, treat_frac_mod,
             g_stat, hom_g_stat,
             current_mean, current_std,
-            dwell_mean, dwell_std, kld
+            np.nan, np.nan, kld
         ], sm_preds
     else:
         return [False, ], None
 
 
 def get_valid_pos(events, min_depth):
-    depth = (events['mean'].notnull()
-                           .groupby('replicate')
-                           .sum())
+    depth = (events.notnull()
+                   .groupby('replicate')
+                   .sum())
     at_min_depth = (depth >= min_depth).all(0)
     valid_pos = at_min_depth.loc[at_min_depth].index.values
     return set(valid_pos)
@@ -263,11 +254,12 @@ def get_cntrl_treat_valid_pos(cntrl_events, treat_events,
     cntrl_valid_pos = get_valid_pos(cntrl_events, min_depth)
     treat_valid_pos = get_valid_pos(treat_events, min_depth)
     valid_pos = cntrl_valid_pos.intersection(treat_valid_pos)
-    yield from get_valid_windows(valid_pos, window_size=3)  
+    yield from get_valid_windows(valid_pos, window_size)  
 
 
 def index_pos_range(events, win):
-    events = events.loc[:, pd.IndexSlice[:, win]]
+    #events = events.loc[:, pd.IndexSlice[:, win]]
+    events = events.loc[:, win]
     events = events.dropna(axis=0)
     return events
 
