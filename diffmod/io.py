@@ -293,9 +293,8 @@ def load_gene_events(gene_id, datasets,
         e['mean'] = e['mean'].astype(np.float64, copy=False)
         e['transcript_idx'] = e['transcript_idx'].astype('category', copy=False)
         e['duration'] = np.log10(e['duration'].astype(np.float64, copy=False))
-        # even when secondary alignments are switched off minimap2
-        # can produce some primary multimappers which need to be
-        # deduplicated
+        # skip stalls longer than a second as they might skew the data
+        e = e.query('duration <= 0')
 
         r_ids = d[f'{gene_id}/read_ids'][:].astype('U32')
         e['read_idx'] = e['read_idx'].map(dict(enumerate(r_ids)))
