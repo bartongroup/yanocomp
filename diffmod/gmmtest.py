@@ -49,7 +49,7 @@ def correct_class_imbalance(cntrl, treat, max_depth, method=None):
     return cntrl, treat
 
 
-def remove_outliers(gmm, X, quantile=0.99):
+def remove_outliers(gmm, X, quantile=0.95):
     prob = gmm.probability(X)
     perc = np.quantile(prob, 1 - quantile)
     return X[prob > perc]
@@ -147,18 +147,23 @@ def gmm_g_test(cntrl_preds, cntrl_reps,
     return het_g, hom_g, p_val
 
 
-def format_sm_preds(sm_preds, index):
-    reps = index.get_level_values('replicate').values
-    read_ids = index.get_level_values('read_idx').values
+def format_sm_preds(sm_preds, events):
+    reps = events.index.get_level_values('replicate').tolist()
+    read_ids = events.index.get_level_values('read_idx').tolist()
+    events = events.values.tolist()
+    sm_preds = sm_preds.tolist()
     sm_preds_dict = {}
-    for rep, read_id, p in zip(reps, read_ids, sm_preds):
-        rep = int(rep)
-        p = float(p)
+    for r_id, rep, ev, p in zip(read_ids, reps, events, sm_preds):
         try:
-            sm_preds_dict[rep][read_id] = p
+            sm_preds_dict[rep]['read_ids'].append(r_id)
         except KeyError:
-            sm_preds_dict[rep] = {}
-            sm_preds_dict[rep][read_id] = p
+            sm_preds_dict[rep] = {
+                'read_ids': [r_id,],
+                'events': [],
+                'preds': []
+            }
+        sm_preds_dict[rep]['events'].append(ev)
+        sm_preds_dict[rep]['preds'].append(p)
     return sm_preds_dict
 
 
@@ -179,14 +184,15 @@ def position_stats(cntrl, treat, kmers,
     pass_ttest = False
     pass_kld = False
     _, tt_p_val = stats.ttest_ind(
-        cntrl.values[:, centre],
-        treat.values[:, centre],
+        cntrl['mean'].values[:, centre],
+        treat['mean'].values[:, centre],
         equal_var=False
     )
     # if there is we can perform the GMM fit and subsequent G test
     if tt_p_val < p_val_threshold:
         pass_ttest = True
-        expected_params = model.loc[kmers].values
+        expected_params = model.loc[:, kmers]
+        expected_params = expected_params.values.reshape(2, -1).T
         cntrl_fit_data = cntrl.values
         treat_fit_data = treat.values
         gmm, kld = fit_gmm(
@@ -211,13 +217,15 @@ def position_stats(cntrl, treat, kmers,
                 treat_preds, treat.index.get_level_values('replicate').values,
                 p_val_threshold=p_val_threshold
             )
+    
     if pass_kld & pass_ttest:
         kmer = kmers[centre]
         # sort out the single molecule predictions
         if p_val < p_val_threshold:
             sm_preds = {
-                'cntrl' : format_sm_preds(cntrl_probs, cntrl.index),
-                'treat' : format_sm_preds(treat_probs, treat.index),
+                'kmers' : kmers.tolist(),
+                'cntrl' : format_sm_preds(cntrl_probs, cntrl),
+                'treat' : format_sm_preds(treat_probs, treat),
             }
         else:
             sm_preds = None
@@ -232,32 +240,40 @@ def position_stats(cntrl, treat, kmers,
 
 
 def get_valid_pos(events, min_depth):
-    depth = (events.notnull()
-                   .groupby('replicate')
-                   .sum())
+    depth = (events['mean'].notnull()
+                           .groupby('replicate')
+                           .sum())
     at_min_depth = (depth >= min_depth).all(0)
     valid_pos = at_min_depth.loc[at_min_depth].index.values
     return set(valid_pos)
 
 
-def get_valid_windows(valid_pos, window_size=3):
+def get_valid_windows(valid_pos, reverse, window_size=3):
     w = window_size // 2
     for pos in valid_pos:
         win = np.arange(pos - w, pos + w + 1)
+        if reverse:
+            win = win[::-1]
         if valid_pos.issuperset(win):
             yield pos, win
 
 
-def get_cntrl_treat_valid_pos(cntrl_events, treat_events,
+def get_cntrl_treat_valid_pos(cntrl_events, treat_events, reverse,
                               min_depth=5, window_size=3):
     cntrl_valid_pos = get_valid_pos(cntrl_events, min_depth)
     treat_valid_pos = get_valid_pos(treat_events, min_depth)
     valid_pos = cntrl_valid_pos.intersection(treat_valid_pos)
-    yield from get_valid_windows(valid_pos, window_size)  
+    yield from get_valid_windows(valid_pos, reverse, window_size)  
 
 
 def index_pos_range(events, win):
-    events = events.loc[:, win]
+    # bug #22797 in pandas makes this difficult
+    #events = events.loc[:, pd.IndexSlice[:, win]]
+    idx = pd.MultiIndex.from_arrays([
+        np.repeat(['mean', 'duration'], len(win)),
+        np.tile(win, 2)
+    ])
+    events = events.reindex(idx, axis=1)
     events = events.dropna(axis=0)
     return events
 
@@ -270,11 +286,11 @@ def test_depth(cntrl_pos_events, treat_pos_events, min_depth=10):
 
 
 def create_positional_data(cntrl_events, treat_events, kmers, locus_id,
-                           min_depth=5, window_size=3):
+                           reverse, min_depth=5, window_size=3):
     # first attempt to filter out any positions below the min_depth threshold
     # we still need to check again later, this just prevents costly indexing ops...
     valid_pos = get_cntrl_treat_valid_pos(
-        cntrl_events, treat_events,
+        cntrl_events, treat_events, reverse,
         min_depth=min_depth,
         window_size=window_size,
     )
@@ -286,7 +302,7 @@ def create_positional_data(cntrl_events, treat_events, kmers, locus_id,
             yield (pos, locus_id, pos_kmers, cntrl_pos_events, treat_pos_events)
 
 
-def iter_positions(gene_id, cntrl_datasets, treat_datasets,
+def iter_positions(gene_id, cntrl_datasets, treat_datasets, reverse,
                    test_level='gene', window_size=3, min_depth=5):
     '''
     Generator which iterates over the positions in a gene
@@ -312,13 +328,15 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets,
                 cntrl_events[transcript_id],
                 treat_events[transcript_id], 
                 kmers, transcript_id,
+                reverse,
                 min_depth=min_depth,
                 window_size=window_size
             )
     else:
         yield from create_positional_data(
             cntrl_events, treat_events, kmers,
-            gene_id, min_depth=min_depth,
+            gene_id, reverse,
+            min_depth=min_depth,
             window_size=window_size
         )
 
@@ -338,6 +356,7 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
             chrom, strand = load_gene_attrs(gene_id, cntrl_h5)
             pos_iter = iter_positions(
                 gene_id, cntrl_h5, treat_h5,
+                reverse=True if strand == '-' else False,
                 test_level=test_level,
                 window_size=window_size,
                 min_depth=min_depth
