@@ -32,14 +32,9 @@ def sliced_earth_mover_distance(dist1, dist2, sample_size=1000,
 
     X1 = dist1.sample(sample_size)
     X2 = dist2.sample(sample_size)
-    n = X1.shape[0]
-    if n == 1:
-        # 1d case
-        return stats.wasserstein_distance(X1, X2)
-    m = X2.shape[0]
-    d = X1.shape[1]
+    n_dim = X1.shape[1]
 
-    projections = get_random_projections(n_projections, d, seed)
+    projections = get_random_projections(n_projections, n_dim, seed)
 
     X1_projections = np.dot(projections, X1.T)
     X2_projections = np.dot(projections, X2.T)
