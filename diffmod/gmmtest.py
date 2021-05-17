@@ -19,19 +19,60 @@ from .io import (
 logger = logging.getLogger('diffmod')
 
 
-def resample(arr, max_size):
+def subsample(arr, max_size):
     if len(arr) <= max_size:
         return arr
     else:
-        return np.random.choice(arr, size=max_size, replace=False)
+        idx = np.arange(len(arr))
+        idx = np.random.choice(idx, size=max_size, replace=False)
+        return arr[idx]
 
 
-def kl_divergence(mvg_1, mvg_2, n_samples=10_000):
-    '''monte carlo simulated KL divergence'''
-    X = mvg_1.sample(n_samples)
-    pred_1 = mvg_1.log_probability(X)
-    pred_2 = mvg_2.log_probability(X)
-    return pred_1.mean() - pred_2.mean()
+def get_random_projections(n_projections, d, seed=None):
+    """
+    Generates n_projections samples from the uniform on the unit sphere of dimension d-1`
+    """
+
+    if not isinstance(seed, np.random.RandomState):
+        random_state = np.random.RandomState(seed)
+    else:
+        random_state = seed
+
+    projections = random_state.normal(0., 1., [n_projections, d])
+    norm = np.linalg.norm(projections, ord=2, axis=1, keepdims=True)
+    projections = projections / norm
+    return projections
+
+
+def sliced_earth_mover_distance(dist1, dist2, sample_size=1000,
+                                n_projections=50, seed=None):
+    """
+    Computes a Monte-Carlo approximation of the 2-Sliced Wasserstein distance
+    modified from python optimal transport (POT)
+    """
+
+    X1 = dist1.sample(sample_size)
+    X2 = dist2.sample(sample_size)
+    n = X1.shape[0]
+    if n == 1:
+        # 1d case
+        return stats.wasserstein_distance(X1, X2)
+    m = X2.shape[0]
+    d = X1.shape[1]
+
+    projections = get_random_projections(n_projections, d, seed)
+
+    X1_projections = np.dot(projections, X1.T)
+    X2_projections = np.dot(projections, X2.T)
+
+    res = 0.
+
+    for i, (X1_proj, X2_proj) in enumerate(zip(X1_projections, X2_projections)):
+        emd = stats.wasserstein_distance(X1_proj, X2_proj)
+        res += emd
+
+    res = (res / n_projections) ** 0.5
+    return res
 
 
 def fit_multisamp_gmm(X, n_components, init, max_iterations=1e8, stop_threshold=0.1,
@@ -98,7 +139,7 @@ def generate_init_points(expected_params, n_components):
 
 
 def fit_gmm(cntrl, treat, expected_params,
-            max_gmm_fit_depth=2000, min_mod_vs_unmod_kld=0.5):
+            max_gmm_fit_depth=1000, min_mod_vs_unmod_emd=0.5):
     '''
     Fits a multivariate, two-gaussian GMM to data and measures KL
     divergence of the resulting distributions.
@@ -107,30 +148,30 @@ def fit_gmm(cntrl, treat, expected_params,
     pooled = cntrl + treat
     samp_sizes = np.array([len(samp) for samp in pooled])
     pooled = [
-        resample(samp, max_gmm_fit_depth) for samp in pooled
+        subsample(samp, max_gmm_fit_depth) for samp in pooled
     ]
     expected, init = generate_init_points(expected_params, 2)
     dists, weights, per_samp_weights = fit_multisamp_gmm(pooled, n_components=2, init=init)
     # use weights to estimate per-sample mod rates
     preds = np.round(per_samp_weights * samp_sizes[:, np.newaxis])
-    kld = kl_divergence(dists[0], dists[1])
+    emd = sliced_earth_mover_distance(dists[0], dists[1])
 
-    if kld >= min_mod_vs_unmod_kld:
+    if emd >= min_mod_vs_unmod_emd:
         # assess which dist is closer to expectation:
-        dist_from_expected = [kl_divergence(expected, icd) for icd in dists]
+        dist_from_expected = [sliced_earth_mover_distance(expected, icd) for icd in dists]
         sort_idx = np.argsort(dist_from_expected)
-        expected_kld = min(dist_from_expected)
+        expected_emd = min(dist_from_expected)
         # sort so that null model is zero
         dists = [dists[i] for i in sort_idx]
         weights = weights[sort_idx]
         preds = preds[:, sort_idx]
     else:
-        # no need to bother with expensive kl divergences
-        expected_kld = np.inf
+        # no need to bother with expensive EMDs
+        expected_emd = np.inf
 
     gmm = pm.GeneralMixtureModel(dists, weights)
     cntrl_preds, treat_preds = preds[:n_cntrl], preds[n_cntrl:]
-    return gmm, kld, expected_kld, cntrl_preds, treat_preds
+    return gmm, emd, expected_emd, cntrl_preds, treat_preds
 
 
 def two_cond_g_test(counts):
@@ -204,9 +245,9 @@ def format_sm_preds(sm_preds, events):
 
 
 def position_stats(cntrl, treat, kmers,
-                   max_gmm_fit_depth=2000,
-                   max_cntrl_vs_exp_kld=1,
-                   min_mod_vs_unmod_kld=0.5,
+                   max_gmm_fit_depth=1000,
+                   max_cntrl_vs_exp_emd=1,
+                   min_mod_vs_unmod_emd=0.5,
                    p_val_threshold=0.05,
                    model=load_model_priors(),
                    generate_sm_preds=False):
@@ -218,7 +259,7 @@ def position_stats(cntrl, treat, kmers,
     # first test that there is actually some difference in cntrl/treat
     # easiest way to do this is to just test the central kmer...
     pass_kstest = False
-    pass_kld = False
+    pass_emd = False
     ks, ks_p_val = stats.ks_2samp(
         cntrl['mean'].values[:, centre],
         treat['mean'].values[:, centre],
@@ -230,19 +271,19 @@ def position_stats(cntrl, treat, kmers,
         expected_params = expected_params.values.reshape(2, -1).T
         cntrl_fit_data = [c.values for _, c in cntrl.groupby('replicate')]
         treat_fit_data = [t.values for _, t in treat.groupby('replicate')]
-        gmm, kld, exp_kld, cntrl_preds, treat_preds = fit_gmm(
+        gmm, emd, exp_emd, cntrl_preds, treat_preds = fit_gmm(
             cntrl_fit_data, treat_fit_data, expected_params,
-            max_gmm_fit_depth, min_mod_vs_unmod_kld
+            max_gmm_fit_depth, min_mod_vs_unmod_emd
         )
         # if the KL divergence of the distributions is too small we stop here
-        if kld >= min_mod_vs_unmod_kld and exp_kld <= max_cntrl_vs_exp_kld and kld > exp_kld:
-            pass_kld = True
+        if emd >= min_mod_vs_unmod_emd and exp_emd <= max_cntrl_vs_exp_emd and emd > exp_emd:
+            pass_emd = True
             g_stat, hom_g_stat, p_val = gmm_g_test(
                 cntrl_preds, treat_preds,
                 p_val_threshold=p_val_threshold
             )
     
-    if pass_kld & pass_kstest:
+    if pass_emd & pass_kstest:
         kmer = kmers[centre]
         # sort out the single molecule predictions
         (mod_mean, mod_std, unmod_mean, umod_std, mod_dir) = get_current_shift_direction(gmm, centre) 
@@ -265,7 +306,7 @@ def position_stats(cntrl, treat, kmers,
             g_stat, hom_g_stat,
             mod_mean, mod_std,
             unmod_mean, umod_std,
-            mod_dir, kld
+            mod_dir, emd
         ], sm_preds
     else:
         return [False, ], None
@@ -374,8 +415,8 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets, reverse,
 
 
 def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
-               window_size=3, min_depth=5, max_gmm_fit_depth=2000,
-               max_cntrl_vs_exp_kld=1, min_mod_vs_unmod_kld=0.5,
+               window_size=3, min_depth=5, max_gmm_fit_depth=1000,
+               max_cntrl_vs_exp_emd=1, min_mod_vs_unmod_emd=0.5,
                p_val_threshold=0.05, generate_sm_preds=False):
     '''
     run the GMM tests on a subset of gene_ids
@@ -397,8 +438,8 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                 r, sm = position_stats(
                     cntrl, treat, kmers,
                     max_gmm_fit_depth=max_gmm_fit_depth,
-                    max_cntrl_vs_exp_kld=1,
-                    min_mod_vs_unmod_kld=0.5,
+                    max_cntrl_vs_exp_emd=max_cntrl_vs_exp_emd,
+                    min_mod_vs_unmod_emd=min_mod_vs_unmod_emd,
                     p_val_threshold=p_val_threshold,
                     model=model,
                     generate_sm_preds=generate_sm_preds
@@ -421,13 +462,13 @@ RESULTS_COLUMNS = [
     'cntrl_frac_mod', 'treat_frac_mod',
     'g_stat', 'hom_g_stat',
     'mod_mu', 'mod_std', 'unmod_mu', 'unmod_std',
-    'current_shift_direction', 'kl_divergence',
+    'current_shift_direction', 'earth_mover_distance',
 ]
 
 
 def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
-                  window_size=3, min_depth=5, max_gmm_fit_depth=2000,
-                  max_cntrl_vs_exp_kld=1, min_mod_vs_unmod_kld=0.5,
+                  window_size=3, min_depth=5, max_gmm_fit_depth=1000,
+                  max_cntrl_vs_exp_emd=1, min_mod_vs_unmod_emd=0.5,
                   p_val_threshold=0.05, processes=1,
                   generate_sm_preds=False):
     '''
@@ -450,8 +491,8 @@ def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
         window_size=window_size,
         min_depth=min_depth,
         max_gmm_fit_depth=max_gmm_fit_depth,
-        max_cntrl_vs_exp_kld=max_cntrl_vs_exp_kld,
-        min_mod_vs_unmod_kld=min_mod_vs_unmod_kld,
+        max_cntrl_vs_exp_emd=max_cntrl_vs_exp_emd,
+        min_mod_vs_unmod_emd=min_mod_vs_unmod_emd,
         p_val_threshold=p_val_threshold,
         generate_sm_preds=generate_sm_preds,
     )
@@ -508,14 +549,14 @@ def check_custom_filter_exprs(ctx, param, exprs):
             raise click.BadParameter(f'--custom-filter issue: {str(e)}')
 
 
-def set_default_kl_divergence(ctx, param, val):
+def set_default_emd(ctx, param, val):
     if val is None:
         win_size = ctx.params['window_size']
         if win_size == 1:
             val = 0.5
         else:
-            val = 2
-        logger.warn(f'Default min kl divergence set to {val} to match '
+            val = 1
+        logger.warn(f'Default min earth mover distance set to {val} to match '
                     f'window size {win_size}')
     return val
 
@@ -528,15 +569,15 @@ def set_default_kl_divergence(ctx, param, val):
 @click.option('-m', '--prior-model-fn', required=False, default=None)
 @click.option('--test-level', required=False, default='gene',
               type=click.Choice(['gene', 'transcript']))
-@click.option('-w', '--window-size', required=False, default=3)
+@click.option('-w', '--window-size', required=False, default=5)
 @click.option('-n', '--min-depth', required=False, default=5)
-@click.option('-d', '--max-gmm-fit-depth', required=False, default=2000)
+@click.option('-d', '--max-gmm-fit-depth', required=False, default=1000)
 @click.option('-b', '--class-balance-method', required=False,
               type=click.Choice(['none', 'undersample', 'oversample']),
               default='none')
 @click.option('-q', '--outlier-quantile', required=False, default=0.95)
-@click.option('-k', '--min-kl-divergence', required=False,
-              default=None, callback=set_default_kl_divergence)
+@click.option('-e', '--min-emd', required=False,
+              default=None, callback=set_default_emd)
 @click.option('-f', '--fdr-threshold', required=False, default=0.05)
 @click.option('--custom-filter', required=False, default=None,
               callback=check_custom_filter_exprs)
@@ -546,7 +587,7 @@ def set_default_kl_divergence(ctx, param, val):
 def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, output_sm_preds_fn,
              prior_model_fn, test_level, window_size, min_depth,
              max_gmm_fit_depth, class_balance_method, outlier_quantile,
-             min_kl_divergence, fdr_threshold, custom_filter,
+             min_emd, fdr_threshold, custom_filter,
              processes, test_gene):
     '''
     Differential RNA modifications using nanopore DRS signal level data
@@ -564,8 +605,8 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, output_sm_preds_fn,
             window_size=window_size,
             min_depth=min_depth,
             max_gmm_fit_depth=max_gmm_fit_depth,
-            max_cntrl_vs_exp_kld=1, # TODO
-            min_mod_vs_unmod_kld=min_kl_divergence,
+            max_cntrl_vs_exp_emd=1, # TODO
+            min_mod_vs_unmod_emd=min_emd,
             p_val_threshold=fdr_threshold,
             processes=processes,
             generate_sm_preds=generate_sm_preds,
@@ -582,8 +623,8 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, output_sm_preds_fn,
             window_size=window_size,
             min_depth=min_depth,
             max_gmm_fit_depth=max_gmm_fit_depth,
-            max_cntrl_vs_exp_kld=1,
-            min_mod_vs_unmod_kld=min_kl_divergence,
+            max_cntrl_vs_exp_emd=1,
+            min_mod_vs_unmod_emd=min_emd,
             p_val_threshold=fdr_threshold,
             generate_sm_preds=generate_sm_preds,
         )
