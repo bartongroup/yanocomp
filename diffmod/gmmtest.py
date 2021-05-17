@@ -34,7 +34,7 @@ def kl_divergence(mvg_1, mvg_2, n_samples=10_000):
     return pred_1.mean() - pred_2.mean()
 
 
-def fit_multisamp_gmm(X, n_components=2, max_iterations=1e8, stop_threshold=0.1,
+def fit_multisamp_gmm(X, n_components, init, max_iterations=1e8, stop_threshold=0.1,
                       inertia=0.01, lr_decay=1e-3, pseudocount=0.5):
     '''
     Fit a gaussian mixture model to multiple samples. Each sample has its own
@@ -44,26 +44,16 @@ def fit_multisamp_gmm(X, n_components=2, max_iterations=1e8, stop_threshold=0.1,
     samp_sizes = [len(samp) for samp in X]
     X_pooled = np.concatenate(X)
     n_dim = X_pooled.shape[1]
-    kmeans = pm.Kmeans(n_components)
-    kmeans.fit(X_pooled)
-    init_pred = [
-        kmeans.predict(samp) for samp in X
-    ]
-    init_pred_pooled = np.concatenate(init_pred)
     dists = [
         pm.IndependentComponentsDistribution([
-            pm.NormalDistribution.from_samples(X_pooled[init_pred_pooled == i, j])
-            for j in range(n_dim)])
-        for i in range(n_components)   
-    ]
-    weights = [
-        np.array([(samp_y == i).mean() for i in range(n_components)])
-        for samp_y in init_pred
+            pm.NormalDistribution(*i) for i in comp_init])
+        for comp_init in init   
     ]
     # dists are shared, weights are not
-    gmms = [pm.GeneralMixtureModel(dists, w) for w in weights]
+    gmms = [pm.GeneralMixtureModel(dists) for _ in X]
     initial_log_probability_sum = -np.inf
     iteration, improvement = 0, np.inf
+    # perform EM
     while improvement > stop_threshold and iteration < max_iterations + 1:
         step_size = 1 - ((1 - inertia) * (2 + iteration) ** -lr_decay)
         if iteration:
@@ -93,6 +83,20 @@ def fit_multisamp_gmm(X, n_components=2, max_iterations=1e8, stop_threshold=0.1,
     return dists, combined_weights, per_samp_weights
 
 
+def generate_init_points(expected_params, n_components):
+    '''
+    Heuristic to generate starting points for fitting GMM - faster than Kmeans
+    '''
+    expected = pm.IndependentComponentsDistribution([
+        pm.NormalDistribution(*e) for e in expected_params
+    ])
+    init = [
+        [[mu, sig] for mu, (_, sig) in zip(sp, expected_params)]
+        for sp in expected.sample(n_components)
+    ]
+    return expected, init
+
+
 def fit_gmm(cntrl, treat, expected_params,
             max_gmm_fit_depth=2000, min_mod_vs_unmod_kld=0.5):
     '''
@@ -105,15 +109,14 @@ def fit_gmm(cntrl, treat, expected_params,
     pooled = [
         resample(samp, max_gmm_fit_depth) for samp in pooled
     ]
-    dists, weights, per_samp_weights = fit_multisamp_gmm(pooled, n_components=2)
+    expected, init = generate_init_points(expected_params, 2)
+    dists, weights, per_samp_weights = fit_multisamp_gmm(pooled, n_components=2, init=init)
+    # use weights to estimate per-sample mod rates
     preds = np.round(per_samp_weights * samp_sizes[:, np.newaxis])
     kld = kl_divergence(dists[0], dists[1])
 
     if kld >= min_mod_vs_unmod_kld:
         # assess which dist is closer to expectation:
-        expected = pm.IndependentComponentsDistribution([
-            pm.NormalDistribution(*e) for e in expected_params
-        ])
         dist_from_expected = [kl_divergence(expected, icd) for icd in dists]
         sort_idx = np.argsort(dist_from_expected)
         expected_kld = min(dist_from_expected)
@@ -122,6 +125,7 @@ def fit_gmm(cntrl, treat, expected_params,
         weights = weights[sort_idx]
         preds = preds[:, sort_idx]
     else:
+        # no need to bother with expensive kl divergences
         expected_kld = np.inf
 
     gmm = pm.GeneralMixtureModel(dists, weights)
@@ -169,6 +173,14 @@ def calculate_mod_stats(cntrl_preds, treat_preds, pseudocount=0.5):
     treat_frac_mod = (treat_pred[1] + pseudocount) / (treat_pred.sum() + pseudocount)
     log_odds = np.log2(treat_frac_mod) - np.log2(cntrl_frac_mod)
     return cntrl_frac_mod, treat_frac_mod, log_odds
+
+
+def get_current_shift_direction(gmm, centre):
+    unmod_dist, mod_dist = gmm.distributions
+    unmod_mean, unmod_std = unmod_dist.distributions[centre].parameters
+    mod_mean, mod_std = mod_dist.distributions[centre].parameters
+    shift_dir = 'h' if mod_mean > unmod_mean else 'l'
+    return mod_mean, mod_std, unmod_mean, unmod_std, shift_dir
 
 
 def format_sm_preds(sm_preds, events):
@@ -222,8 +234,6 @@ def position_stats(cntrl, treat, kmers,
             cntrl_fit_data, treat_fit_data, expected_params,
             max_gmm_fit_depth, min_mod_vs_unmod_kld
         )
-        current_mean, current_std = gmm.distributions[1][centre].parameters
-        cntrl_frac_mod, treat_frac_mod, log_odds = calculate_mod_stats(cntrl_preds, treat_preds)
         # if the KL divergence of the distributions is too small we stop here
         if kld >= min_mod_vs_unmod_kld and exp_kld <= max_cntrl_vs_exp_kld and kld > exp_kld:
             pass_kld = True
@@ -235,6 +245,10 @@ def position_stats(cntrl, treat, kmers,
     if pass_kld & pass_kstest:
         kmer = kmers[centre]
         # sort out the single molecule predictions
+        (mod_mean, mod_std, unmod_mean, umod_std, mod_dir) = get_current_shift_direction(gmm, centre) 
+        cntrl_frac_mod, treat_frac_mod, log_odds = calculate_mod_stats(
+            cntrl_preds, treat_preds
+        )
         if p_val < p_val_threshold and generate_sm_preds:
             cntrl_probs = gmm.predict_proba(np.concatenate(cntrl_fit_data))[:, 1]
             treat_probs = gmm.predict_proba(np.concatenate(treat_fit_data))[:, 1]
@@ -249,7 +263,9 @@ def position_stats(cntrl, treat, kmers,
             True, kmer, log_odds, p_val, 1,       # placeholder for fdr
             cntrl_frac_mod, treat_frac_mod,
             g_stat, hom_g_stat,
-            current_mean, current_std, kld
+            mod_mean, mod_std,
+            unmod_mean, umod_std,
+            mod_dir, kld
         ], sm_preds
     else:
         return [False, ], None
@@ -404,7 +420,8 @@ RESULTS_COLUMNS = [
     'log_odds', 'p_val', 'fdr',
     'cntrl_frac_mod', 'treat_frac_mod',
     'g_stat', 'hom_g_stat',
-    'current_mu', 'current_std', 'kl_divergence',
+    'mod_mu', 'mod_std', 'unmod_mu', 'unmod_std',
+    'current_shift_direction', 'kl_divergence',
 ]
 
 
