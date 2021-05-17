@@ -13,7 +13,7 @@ import pandas as pd
 import h5py as h5
 
 logger = logging.getLogger('diffmod')
-
+pd.options.mode.chained_assignment = None
 
 # Functions for parsing input text files e.g. eventalign tsv or GTF
 
@@ -290,20 +290,20 @@ def load_gene_events(gene_id, datasets,
         e = pd.DataFrame(d[f'{gene_id}/events'][:])
         e.drop_duplicates(['read_idx', 'pos'], keep='first', inplace=True)
         # convert f16 to f64
-        e['mean'] = e['mean'].astype(np.float64, copy=False)
-        e['transcript_idx'] = e['transcript_idx'].astype('category', copy=False)
-        e['duration'] = np.log10(e['duration'].astype(np.float64, copy=False))
+        e.loc[:, 'mean'] = e['mean'].astype(np.float64, copy=False)
+        e.loc[:, 'transcript_idx'] = e['transcript_idx'].astype('category', copy=False)
+        e.loc[:, 'duration'] = np.log10(e['duration'].astype(np.float64, copy=False))
         # skip stalls longer than a second as they might skew the data
         e = e.query('duration <= 0')
 
         r_ids = d[f'{gene_id}/read_ids'][:].astype('U32')
-        e['read_idx'] = e['read_idx'].map(dict(enumerate(r_ids)))
-        e['replicate'] = rep
+        e.loc[:, 'read_idx'] = e['read_idx'].map(dict(enumerate(r_ids)))
+        e.loc[:, 'replicate'] = rep
         e.set_index(['pos', 'read_idx', 'replicate'], inplace=True)
 
         if by_transcript_ids:
             t_ids = d[f'{gene_id}/transcript_ids'][:]
-            e['transcript_idx'].cat.rename_categories(
+            e.transcript_idx.cat.rename_categories(
                 dict(enumerate(t_ids)),
                 inplace=True
             )
@@ -369,7 +369,8 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
             (chrom, pos, gene_id, strand, kmer,
              log_odds, pval, fdr, c_fm, t_fm,
              g_stat, hom_g_stat,
-             c_mu, c_std, kld) = record
+             mod_mu, mod_std, unmod_mu, unmod_std,
+             shift_dir, kld) = record
             score = int(round(min(- np.log10(fdr), 100)))
             bed_record = (
                 f'{chrom:s}\t{pos - 2:d}\t{pos + 3:d}\t'
@@ -377,7 +378,9 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
                 f'{log_odds:.2f}\t{pval:.2g}\t{fdr:.2g}\t'
                 f'{c_fm:.2f}\t{t_fm:.2f}\t'
                 f'{g_stat:.2f}\t{hom_g_stat:.2f}\t'
-                f'{c_mu:.2f}\t{c_std:.2f}\t{kld:.2f}\n'
+                f'{mod_mu:.2f}\t{mod_std:.2f}\t'
+                f'{unmod_mu:.2f}\t{unmod_std:.2f}\t'
+                f'{shift_dir:s}\t{kld:.2f}\n'
             )
             bed.write(bed_record)
 
