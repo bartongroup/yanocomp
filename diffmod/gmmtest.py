@@ -19,6 +19,13 @@ from .io import (
 logger = logging.getLogger('diffmod')
 
 
+def resample(arr, max_size):
+    if len(arr) <= max_size:
+        return arr
+    else:
+        return np.random.choice(arr, size=max_size, replace=False)
+
+
 def kl_divergence(mvg_1, mvg_2, n_samples=10_000):
     '''monte carlo simulated KL divergence'''
     X = mvg_1.sample(n_samples)
@@ -27,87 +34,95 @@ def kl_divergence(mvg_1, mvg_2, n_samples=10_000):
     return pred_1.mean() - pred_2.mean()
 
 
-def correct_class_imbalance(cntrl, treat, max_depth, method=None):
-    n_cntrl, n_treat = len(cntrl), len(treat)
-    max_depth_per_samp = max_depth // 2
-    rng = np.random.default_rng()
-    if method is None or method == 'none':
-        if n_cntrl > max_depth_per_samp:
-            cntrl = rng.choice(cntrl, max_depth_per_samp, replace=False)
-        if n_treat > max_depth_per_samp:
-            treat = rng.choice(treat, max_depth_per_samp, replace=False)
-    elif method == 'undersample':
-        n_samp = min(n_treat, n_cntrl, max_depth_per_samp)
-        cntrl = rng.choice(cntrl, n_samp, replace=False)
-        treat = rng.choice(treat, n_samp, replace=False)
-    elif method == 'oversample':
-        n_samp = min(max_depth_per_samp, max(n_cntrl, n_treat))
-        cntrl = rng.choice(cntrl, n_samp, replace=True)
-        treat = rng.choice(treat, n_samp, replace=True)
-    else:
-        raise ValueError(f'Sampling method "{method}" not implemented')
-    return cntrl, treat
-
-
-def remove_outliers(gmm, X, quantile=0.95):
-    prob = gmm.probability(X)
-    perc = np.quantile(prob, 1 - quantile)
-    return X[prob > perc]
-
-
-def fit_gmm(cntrl, treat, expected_params,
-            max_gmm_fit_depth=10_000,
-            balance_method=None, refit_quantile=0.95):
+def fit_multisamp_gmm(X, n_components=2, max_iterations=1e8, stop_threshold=0.1,
+                      inertia=0.01, lr_decay=1e-3, pseudocount=0.5):
     '''
-    Fits a multivariate, two-gaussian GMM to pooled data and measures KL
+    Fit a gaussian mixture model to multiple samples. Each sample has its own
+    GMM with its own weights but shares distributions with others. Returns
+    a dists and weights both for combined data and for each sample
+    '''
+    samp_sizes = [len(samp) for samp in X]
+    X_pooled = np.concatenate(X)
+    n_dim = X_pooled.shape[1]
+    kmeans = pm.Kmeans(n_components)
+    kmeans.fit(X_pooled)
+    init_pred = [
+        kmeans.predict(samp) for samp in X
+    ]
+    init_pred_pooled = np.concatenate(init_pred)
+    dists = [
+        pm.IndependentComponentsDistribution([
+            pm.NormalDistribution.from_samples(X_pooled[init_pred_pooled == i, j])
+            for j in range(n_dim)])
+        for i in range(n_components)   
+    ]
+    weights = [
+        np.array([(samp_y == i).mean() for i in range(n_components)])
+        for samp_y in init_pred
+    ]
+    # dists are shared, weights are not
+    gmms = [pm.GeneralMixtureModel(dists, w) for w in weights]
+    initial_log_probability_sum = -np.inf
+    iteration, improvement = 0, np.inf
+    while improvement > stop_threshold and iteration < max_iterations + 1:
+        step_size = 1 - ((1 - inertia) * (2 + iteration) ** -lr_decay)
+        if iteration:
+            for d in dists:
+                d.from_summaries(step_size)
+            for gmm in gmms:
+                if gmm.summaries.sum():
+                    summaries = gmm.summaries + pseudocount
+                    summaries /= summaries.sum()
+                    gmm.weights[:] = np.log(summaries)
+                    gmm.summaries[:] = 0
+
+        log_probability_sum = 0
+        for gmm, samp in zip(gmms, X):
+            log_probability_sum += gmm.summarize(samp)
+
+        if iteration == 0:
+            initial_log_probability_sum = log_probability_sum
+        else:
+            improvement = log_probability_sum - last_log_probability_sum
+
+        iteration += 1
+        last_log_probability_sum = log_probability_sum
+
+    per_samp_weights = np.array([np.exp(gmm.weights) for gmm in gmms])
+    combined_weights = np.average(per_samp_weights, axis=0, weights=samp_sizes)
+    return dists, combined_weights, per_samp_weights
+
+
+def fit_gmm(cntrl, treat, expected_params, max_gmm_fit_depth=2000):
+    '''
+    Fits a multivariate, two-gaussian GMM to data and measures KL
     divergence of the resulting distributions.
     '''
-    window_size = len(expected_params) // 2
-    centre = window_size // 2
-    cntrl, treat = correct_class_imbalance(
-        cntrl, treat, max_gmm_fit_depth, balance_method
-    )
-    pooled = np.concatenate([cntrl, treat], axis=0)
-    # Model starts as two identical multivariate normal distributions initialised
-    # from the expected parameters. The first is frozen (i.e. cannot be fit).
-    gmm = pm.GeneralMixtureModel([
-        pm.IndependentComponentsDistribution([
-            pm.NormalDistribution(*p, frozen=True) for p in expected_params
-        ], frozen=True),
-        pm.IndependentComponentsDistribution([
-            pm.NormalDistribution(*p) for p in expected_params
-        ]),
+    n_cntrl = len(cntrl)
+    pooled = cntrl + treat
+    samp_sizes = np.array([len(samp) for samp in pooled])
+    pooled = [
+        resample(samp, max_gmm_fit_depth) for samp in pooled
+    ]
+    dists, weights, per_samp_weights = fit_multisamp_gmm(pooled, n_components=2)
+    preds = np.round(per_samp_weights * samp_sizes[:, np.newaxis])
+
+    # assess which dist is closer to expectation:
+    expected = pm.IndependentComponentsDistribution([
+        pm.NormalDistribution(*e) for e in expected_params
     ])
-    gmm.fit(pooled)
-    # sometimes using the first model to remove outliers can improve the fit
-    if refit_quantile != 1:
-        pooled = remove_outliers(gmm, pooled, refit_quantile)
-        gmm.fit(pooled)
-    kld = kl_divergence(gmm.distributions[0], gmm.distributions[1])
-    return gmm, kld
+    dist_from_expected = [kl_divergence(expected, icd) for icd in dists]
+    sort_idx = np.argsort(dist_from_expected)
+    expected_kld = min(dist_from_expected)
+    # sort so that null model is zero
+    dists = [dists[i] for i in sort_idx]
+    weights = weights[sort_idx]
+    preds = preds[:, sort_idx]
 
-
-def gmm_predictions(gmm, events, pseudocount=np.finfo('f').tiny):
-    '''
-    Use the GMM to make single molecule predictions and calculate fraction
-    modified.
-    '''
-    probs = gmm.predict_proba(events)
-    preds = probs.argmax(1)
-    log_prob = np.log2(probs.sum(0) + pseudocount)
-    log_ratio = log_prob[1] - log_prob[0]
-    frac_mod = preds.sum() / len(preds)
-    return preds, probs[:, 1], frac_mod, log_ratio
-
-
-def crosstab_preds_per_replicate(preds, replicates):
-    '''
-    Makes contingency table of replicates vs predictions
-    '''
-    # make categorical to catch cases where 100% of preds are one class
-    preds = pd.Categorical(preds, categories=[0, 1])
-    ct = pd.crosstab(replicates, preds, dropna=False).values
-    return ct
+    gmm = pm.GeneralMixtureModel(dists, weights)
+    kld = kl_divergence(dists[0], dists[1])
+    cntrl_preds, treat_preds = preds[:n_cntrl], preds[n_cntrl:]
+    return gmm, kld, expected_kld, cntrl_preds, treat_preds
 
 
 def two_cond_g_test(counts):
@@ -124,27 +139,32 @@ def two_cond_g_test(counts):
         return 0.0, 1.0
 
 
-def gmm_g_test(cntrl_preds, cntrl_reps,
-               treat_preds, treat_reps,
-               p_val_threshold=0.05):
+def gmm_g_test(cntrl_preds, treat_preds, p_val_threshold=0.05):
     '''
     Perform G tests for differential modification and within-condition
     homogeneity
     '''
-    cntrl_counts = crosstab_preds_per_replicate(cntrl_preds, cntrl_reps)
-    treat_counts = crosstab_preds_per_replicate(treat_preds, treat_reps)
     het_g, p_val = two_cond_g_test([
-        cntrl_counts.sum(0), treat_counts.sum(0)
+        cntrl_preds.sum(0), treat_preds.sum(0)
     ])
     if p_val < p_val_threshold:
-        cntrl_hom_g, _, = two_cond_g_test(cntrl_counts)
-        treat_hom_g, _, = two_cond_g_test(treat_counts)
+        cntrl_hom_g, _, = two_cond_g_test(cntrl_preds)
+        treat_hom_g, _, = two_cond_g_test(treat_preds)
         hom_g = cntrl_hom_g + treat_hom_g
         if hom_g >= het_g:
             p_val = 1
     else:
         hom_g = np.nan
     return het_g, hom_g, p_val
+
+
+def calculate_mod_stats(cntrl_preds, treat_preds, pseudocount=0.5):
+    cntrl_pred = cntrl_preds.sum(0)
+    treat_pred = treat_preds.sum(0)
+    cntrl_frac_mod = (cntrl_pred[1] + pseudocount) / (cntrl_pred.sum() + pseudocount)
+    treat_frac_mod = (treat_pred[1] + pseudocount) / (treat_pred.sum() + pseudocount)
+    log_odds = np.log2(treat_frac_mod) - np.log2(cntrl_frac_mod)
+    return cntrl_frac_mod, treat_frac_mod, log_odds
 
 
 def format_sm_preds(sm_preds, events):
@@ -168,12 +188,12 @@ def format_sm_preds(sm_preds, events):
 
 
 def position_stats(cntrl, treat, kmers,
-                   max_gmm_fit_depth=10_000,
-                   balance_method=None,
-                   refit_quantile=0.95,
-                   min_kld=0.5,
+                   max_gmm_fit_depth=2000,
+                   max_cntrl_vs_exp_kld=1,
+                   min_treat_vs_cntrl_kld=0.5,
                    p_val_threshold=0.05,
-                   model=load_model_priors()):
+                   model=load_model_priors(),
+                   generate_sm_preds=False):
     '''
     Fits the GMM, estimates mod rates/changes, and performs G test
     '''
@@ -181,47 +201,39 @@ def position_stats(cntrl, treat, kmers,
     centre = window_size // 2
     # first test that there is actually some difference in cntrl/treat
     # easiest way to do this is to just test the central kmer...
-    pass_ttest = False
+    pass_kstest = False
     pass_kld = False
-    _, tt_p_val = stats.ttest_ind(
+    ks, ks_p_val = stats.ks_2samp(
         cntrl['mean'].values[:, centre],
         treat['mean'].values[:, centre],
-        equal_var=False
     )
     # if there is we can perform the GMM fit and subsequent G test
-    if tt_p_val < p_val_threshold:
-        pass_ttest = True
+    if ks_p_val < p_val_threshold:
+        pass_kstest = True
         expected_params = model.loc[:, kmers]
         expected_params = expected_params.values.reshape(2, -1).T
-        cntrl_fit_data = cntrl.values
-        treat_fit_data = treat.values
-        gmm, kld = fit_gmm(
-            cntrl_fit_data, treat_fit_data,
-            expected_params,
-            max_gmm_fit_depth, balance_method,
-            refit_quantile
+        cntrl_fit_data = [c.values for _, c in cntrl.groupby('replicate')]
+        treat_fit_data = [t.values for _, t in treat.groupby('replicate')]
+        gmm, kld, exp_kld, cntrl_preds, treat_preds = fit_gmm(
+            cntrl_fit_data, treat_fit_data, expected_params,
+            max_gmm_fit_depth,
         )
         current_mean, current_std = gmm.distributions[1][centre].parameters
+        cntrl_frac_mod, treat_frac_mod, log_odds = calculate_mod_stats(cntrl_preds, treat_preds)
         # if the KL divergence of the distributions is too small we stop here
-        if kld >= min_kld:
+        if kld >= min_treat_vs_cntrl_kld and exp_kld <= max_cntrl_vs_exp_kld and kld > exp_kld:
             pass_kld = True
-            cntrl_preds, cntrl_probs, cntrl_frac_mod, cntrl_lr = gmm_predictions(
-                gmm, cntrl_fit_data
-            )
-            treat_preds, treat_probs, treat_frac_mod, treat_lr = gmm_predictions(
-                gmm, treat_fit_data
-            )
-            log_odds = treat_lr - cntrl_lr
             g_stat, hom_g_stat, p_val = gmm_g_test(
-                cntrl_preds, cntrl.index.get_level_values('replicate').values,
-                treat_preds, treat.index.get_level_values('replicate').values,
+                cntrl_preds, treat_preds,
                 p_val_threshold=p_val_threshold
             )
     
-    if pass_kld & pass_ttest:
+    if pass_kld & pass_kstest:
         kmer = kmers[centre]
         # sort out the single molecule predictions
-        if p_val < p_val_threshold:
+        if p_val < p_val_threshold and generate_sm_preds:
+            cntrl_probs = gmm.predict_proba(np.concatenate(cntrl_fit_data))[:, 1]
+            treat_probs = gmm.predict_proba(np.concatenate(treat_fit_data))[:, 1]
             sm_preds = {
                 'kmers' : kmers.tolist(),
                 'cntrl' : format_sm_preds(cntrl_probs, cntrl),
@@ -342,9 +354,9 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets, reverse,
 
 
 def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
-               window_size=3, min_depth=5, max_gmm_fit_depth=10_000,
-               balance_method=None, refit_quantile=0.95, min_kld=0.5,
-               p_val_threshold=0.05):
+               window_size=3, min_depth=5, max_gmm_fit_depth=2000,
+               max_cntrl_vs_exp_kld=1, min_treat_vs_cntrl_kld=0.5,
+               p_val_threshold=0.05, generate_sm_preds=False):
     '''
     run the GMM tests on a subset of gene_ids
     '''
@@ -362,25 +374,23 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                 min_depth=min_depth
             )
             for pos, feature_id, kmers, cntrl, treat in pos_iter:
+                if feature_id not in chunk_sm_preds:
+                    chunk_sm_preds[feature_id] = {}
                 r, sm = position_stats(
                     cntrl, treat, kmers,
                     max_gmm_fit_depth=max_gmm_fit_depth,
-                    balance_method=balance_method,
-                    refit_quantile=refit_quantile,
-                    min_kld=min_kld,
+                    max_cntrl_vs_exp_kld=1,
+                    min_treat_vs_cntrl_kld=0.5,
                     p_val_threshold=p_val_threshold,
                     model=model,
+                    generate_sm_preds=generate_sm_preds
                 )
                 if r[0]:
                     r = [chrom, pos, feature_id, strand] + r[1:]
                     chunk_res.append(r)
                     if sm is not None:
                         pos = int(pos)
-                        try:
-                            chunk_sm_preds[feature_id][pos] = sm
-                        except KeyError:
-                            chunk_sm_preds[feature_id] = {}
-                            chunk_sm_preds[feature_id][pos] = sm
+                        chunk_sm_preds[feature_id][pos] = sm
     return chunk_res, chunk_sm_preds
 
 
@@ -394,9 +404,10 @@ RESULTS_COLUMNS = [
 
 
 def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
-                  window_size=3, min_depth=5, max_gmm_fit_depth=10_000,
-                  balance_method=None, refit_quantile=0.95, min_kld=0.5,
-                  p_val_threshold=0.05, processes=1):
+                  window_size=3, min_depth=5, max_gmm_fit_depth=2000,
+                  max_cntrl_vs_exp_kld=1, min_treat_vs_cntrl_kld=0.5,
+                  p_val_threshold=0.05, processes=1,
+                  generate_sm_preds=False):
     '''
     Runs the GMM tests on positions from gene_ids which are found in all HDF5.
     Gene ids are processed as parallel chunks.
@@ -417,10 +428,10 @@ def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
         window_size=window_size,
         min_depth=min_depth,
         max_gmm_fit_depth=max_gmm_fit_depth,
-        balance_method=balance_method,
-        refit_quantile=refit_quantile,
-        min_kld=min_kld,
-        p_val_threshold=p_val_threshold
+        max_cntrl_vs_exp_kld=max_cntrl_vs_exp_kld,
+        min_treat_vs_cntrl_kld=min_treat_vs_cntrl_kld,
+        p_val_threshold=p_val_threshold,
+        generate_sm_preds=generate_sm_preds,
     )
     if processes > 1:
         with mp.Pool(processes) as pool:
@@ -496,7 +507,7 @@ def set_default_kl_divergence(ctx, param, val):
               type=click.Choice(['gene', 'transcript']))
 @click.option('-w', '--window-size', required=False, default=3)
 @click.option('-n', '--min-depth', required=False, default=5)
-@click.option('-d', '--max-gmm-fit-depth', required=False, default=10_000)
+@click.option('-d', '--max-gmm-fit-depth', required=False, default=2000)
 @click.option('-b', '--class-balance-method', required=False,
               type=click.Choice(['none', 'undersample', 'oversample']),
               default='none')
@@ -521,6 +532,7 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, output_sm_preds_fn,
         f'Running gmmtest with {len(cntrl_hdf5_fns):,} control '
         f'datasets and {len(treat_hdf5_fns):,} treatment datasets'
     )
+    generate_sm_preds = output_sm_preds_fn is not None
     if test_gene is None:
         res, sm_preds = parallel_test(
             cntrl_hdf5_fns, treat_hdf5_fns,
@@ -529,11 +541,11 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, output_sm_preds_fn,
             window_size=window_size,
             min_depth=min_depth,
             max_gmm_fit_depth=max_gmm_fit_depth,
-            balance_method=class_balance_method,
-            refit_quantile=outlier_quantile,
-            min_kld=min_kl_divergence,
+            max_cntrl_vs_exp_kld=1, # TODO
+            min_treat_vs_cntrl_kld=min_kl_divergence,
             p_val_threshold=fdr_threshold,
-            processes=processes
+            processes=processes,
+            generate_sm_preds=generate_sm_preds,
         )
     else:
         logger.info(
@@ -547,10 +559,10 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, output_sm_preds_fn,
             window_size=window_size,
             min_depth=min_depth,
             max_gmm_fit_depth=max_gmm_fit_depth,
-            balance_method=class_balance_method,
-            refit_quantile=outlier_quantile,
-            min_kld=min_kl_divergence,
+            max_cntrl_vs_exp_kld=1,
+            min_treat_vs_cntrl_kld=min_kl_divergence,
             p_val_threshold=fdr_threshold,
+            generate_sm_preds=generate_sm_preds,
         )
         res = pd.DataFrame(res, columns=RESULTS_COLUMNS)
         _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
