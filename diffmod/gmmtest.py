@@ -93,7 +93,8 @@ def fit_multisamp_gmm(X, n_components=2, max_iterations=1e8, stop_threshold=0.1,
     return dists, combined_weights, per_samp_weights
 
 
-def fit_gmm(cntrl, treat, expected_params, max_gmm_fit_depth=2000):
+def fit_gmm(cntrl, treat, expected_params,
+            max_gmm_fit_depth=2000, min_mod_vs_unmod_kld=0.5):
     '''
     Fits a multivariate, two-gaussian GMM to data and measures KL
     divergence of the resulting distributions.
@@ -106,21 +107,24 @@ def fit_gmm(cntrl, treat, expected_params, max_gmm_fit_depth=2000):
     ]
     dists, weights, per_samp_weights = fit_multisamp_gmm(pooled, n_components=2)
     preds = np.round(per_samp_weights * samp_sizes[:, np.newaxis])
+    kld = kl_divergence(dists[0], dists[1])
 
-    # assess which dist is closer to expectation:
-    expected = pm.IndependentComponentsDistribution([
-        pm.NormalDistribution(*e) for e in expected_params
-    ])
-    dist_from_expected = [kl_divergence(expected, icd) for icd in dists]
-    sort_idx = np.argsort(dist_from_expected)
-    expected_kld = min(dist_from_expected)
-    # sort so that null model is zero
-    dists = [dists[i] for i in sort_idx]
-    weights = weights[sort_idx]
-    preds = preds[:, sort_idx]
+    if kld >= min_mod_vs_unmod_kld:
+        # assess which dist is closer to expectation:
+        expected = pm.IndependentComponentsDistribution([
+            pm.NormalDistribution(*e) for e in expected_params
+        ])
+        dist_from_expected = [kl_divergence(expected, icd) for icd in dists]
+        sort_idx = np.argsort(dist_from_expected)
+        expected_kld = min(dist_from_expected)
+        # sort so that null model is zero
+        dists = [dists[i] for i in sort_idx]
+        weights = weights[sort_idx]
+        preds = preds[:, sort_idx]
+    else:
+        expected_kld = np.inf
 
     gmm = pm.GeneralMixtureModel(dists, weights)
-    kld = kl_divergence(dists[0], dists[1])
     cntrl_preds, treat_preds = preds[:n_cntrl], preds[n_cntrl:]
     return gmm, kld, expected_kld, cntrl_preds, treat_preds
 
@@ -190,7 +194,7 @@ def format_sm_preds(sm_preds, events):
 def position_stats(cntrl, treat, kmers,
                    max_gmm_fit_depth=2000,
                    max_cntrl_vs_exp_kld=1,
-                   min_treat_vs_cntrl_kld=0.5,
+                   min_mod_vs_unmod_kld=0.5,
                    p_val_threshold=0.05,
                    model=load_model_priors(),
                    generate_sm_preds=False):
@@ -216,12 +220,12 @@ def position_stats(cntrl, treat, kmers,
         treat_fit_data = [t.values for _, t in treat.groupby('replicate')]
         gmm, kld, exp_kld, cntrl_preds, treat_preds = fit_gmm(
             cntrl_fit_data, treat_fit_data, expected_params,
-            max_gmm_fit_depth,
+            max_gmm_fit_depth, min_mod_vs_unmod_kld
         )
         current_mean, current_std = gmm.distributions[1][centre].parameters
         cntrl_frac_mod, treat_frac_mod, log_odds = calculate_mod_stats(cntrl_preds, treat_preds)
         # if the KL divergence of the distributions is too small we stop here
-        if kld >= min_treat_vs_cntrl_kld and exp_kld <= max_cntrl_vs_exp_kld and kld > exp_kld:
+        if kld >= min_mod_vs_unmod_kld and exp_kld <= max_cntrl_vs_exp_kld and kld > exp_kld:
             pass_kld = True
             g_stat, hom_g_stat, p_val = gmm_g_test(
                 cntrl_preds, treat_preds,
@@ -355,7 +359,7 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets, reverse,
 
 def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                window_size=3, min_depth=5, max_gmm_fit_depth=2000,
-               max_cntrl_vs_exp_kld=1, min_treat_vs_cntrl_kld=0.5,
+               max_cntrl_vs_exp_kld=1, min_mod_vs_unmod_kld=0.5,
                p_val_threshold=0.05, generate_sm_preds=False):
     '''
     run the GMM tests on a subset of gene_ids
@@ -374,13 +378,11 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                 min_depth=min_depth
             )
             for pos, feature_id, kmers, cntrl, treat in pos_iter:
-                if feature_id not in chunk_sm_preds:
-                    chunk_sm_preds[feature_id] = {}
                 r, sm = position_stats(
                     cntrl, treat, kmers,
                     max_gmm_fit_depth=max_gmm_fit_depth,
                     max_cntrl_vs_exp_kld=1,
-                    min_treat_vs_cntrl_kld=0.5,
+                    min_mod_vs_unmod_kld=0.5,
                     p_val_threshold=p_val_threshold,
                     model=model,
                     generate_sm_preds=generate_sm_preds
@@ -388,8 +390,11 @@ def test_chunk(gene_ids, cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                 if r[0]:
                     r = [chrom, pos, feature_id, strand] + r[1:]
                     chunk_res.append(r)
-                    if sm is not None:
-                        pos = int(pos)
+                    pos = int(pos)
+                    try:
+                        chunk_sm_preds[feature_id][pos] = sm
+                    except KeyError:
+                        chunk_sm_preds[feature_id] = {}
                         chunk_sm_preds[feature_id][pos] = sm
     return chunk_res, chunk_sm_preds
 
@@ -405,7 +410,7 @@ RESULTS_COLUMNS = [
 
 def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
                   window_size=3, min_depth=5, max_gmm_fit_depth=2000,
-                  max_cntrl_vs_exp_kld=1, min_treat_vs_cntrl_kld=0.5,
+                  max_cntrl_vs_exp_kld=1, min_mod_vs_unmod_kld=0.5,
                   p_val_threshold=0.05, processes=1,
                   generate_sm_preds=False):
     '''
@@ -429,7 +434,7 @@ def parallel_test(cntrl_fns, treat_fns, model_fn=None, test_level='gene',
         min_depth=min_depth,
         max_gmm_fit_depth=max_gmm_fit_depth,
         max_cntrl_vs_exp_kld=max_cntrl_vs_exp_kld,
-        min_treat_vs_cntrl_kld=min_treat_vs_cntrl_kld,
+        min_mod_vs_unmod_kld=min_mod_vs_unmod_kld,
         p_val_threshold=p_val_threshold,
         generate_sm_preds=generate_sm_preds,
     )
@@ -464,11 +469,12 @@ def filter_results(res, sm_preds, fdr_threshold, custom_filter):
     sig_sm_preds = {}
     for gene_id, pos in sig_res[['gene_id', 'pos']].itertuples(index=False):
         p = sm_preds[gene_id][pos]
-        try:
-            sig_sm_preds[gene_id][pos] = p
-        except KeyError:
-            sig_sm_preds[gene_id] = {}
-            sig_sm_preds[gene_id][pos] = p
+        if p is not None:
+            try:
+                sig_sm_preds[gene_id][pos] = p
+            except KeyError:
+                sig_sm_preds[gene_id] = {}
+                sig_sm_preds[gene_id][pos] = p
     return sig_res, sig_sm_preds
 
 
@@ -542,7 +548,7 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, output_sm_preds_fn,
             min_depth=min_depth,
             max_gmm_fit_depth=max_gmm_fit_depth,
             max_cntrl_vs_exp_kld=1, # TODO
-            min_treat_vs_cntrl_kld=min_kl_divergence,
+            min_mod_vs_unmod_kld=min_kl_divergence,
             p_val_threshold=fdr_threshold,
             processes=processes,
             generate_sm_preds=generate_sm_preds,
@@ -560,7 +566,7 @@ def gmm_test(cntrl_hdf5_fns, treat_hdf5_fns, output_bed_fn, output_sm_preds_fn,
             min_depth=min_depth,
             max_gmm_fit_depth=max_gmm_fit_depth,
             max_cntrl_vs_exp_kld=1,
-            min_treat_vs_cntrl_kld=min_kl_divergence,
+            min_mod_vs_unmod_kld=min_kl_divergence,
             p_val_threshold=fdr_threshold,
             generate_sm_preds=generate_sm_preds,
         )
