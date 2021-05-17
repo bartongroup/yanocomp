@@ -370,7 +370,7 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
              log_odds, pval, fdr, c_fm, t_fm,
              g_stat, hom_g_stat,
              mod_mu, mod_std, unmod_mu, unmod_std,
-             shift_dir, kld) = record
+             shift_dir, emd, ks, ks_p) = record
             score = int(round(min(- np.log10(fdr), 100)))
             bed_record = (
                 f'{chrom:s}\t{pos - 2:d}\t{pos + 3:d}\t'
@@ -380,7 +380,7 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
                 f'{g_stat:.2f}\t{hom_g_stat:.2f}\t'
                 f'{mod_mu:.2f}\t{mod_std:.2f}\t'
                 f'{unmod_mu:.2f}\t{unmod_std:.2f}\t'
-                f'{shift_dir:s}\t{kld:.2f}\n'
+                f'{shift_dir:s}\t{emd:.2f}\t{ks:.2f}\n'
             )
             bed.write(bed_record)
 
