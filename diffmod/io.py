@@ -368,18 +368,19 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05):
             (chrom, pos, gene_id, strand, kmer,
              log_odds, pval, fdr, c_fm, t_fm,
              g_stat, hom_g_stat,
-             mod_mu, mod_std, unmod_mu, unmod_std,
-             shift_dir, emd, ks, ks_p) = record
-            score = int(round(min(- np.log10(fdr), 100)))
+             unmod_mu, unmod_std, mod_mu, mod_std,
+             ks, shift_dir) = record
+            with np.errstate(divide='ignore'):
+                score = int(round(min(- np.log10(fdr), 100)))
             bed_record = (
                 f'{chrom:s}\t{pos - 2:d}\t{pos + 3:d}\t'
                 f'{gene_id}:{kmer}\t{score:d}\t{strand:s}\t'
                 f'{log_odds:.2f}\t{pval:.2g}\t{fdr:.2g}\t'
                 f'{c_fm:.2f}\t{t_fm:.2f}\t'
                 f'{g_stat:.2f}\t{hom_g_stat:.2f}\t'
-                f'{mod_mu:.2f}\t{mod_std:.2f}\t'
                 f'{unmod_mu:.2f}\t{unmod_std:.2f}\t'
-                f'{shift_dir:s}\t{emd:.2f}\t{ks:.2f}\n'
+                f'{mod_mu:.2f}\t{mod_std:.2f}\t'
+                f'{shift_dir:s}\t{ks:.2f}\n'
             )
             bed.write(bed_record)
 

@@ -14,7 +14,7 @@ from .io import (
     load_gene_kmers, load_gene_events, load_gene_attrs,
     save_gmmtest_results, save_sm_preds
 )
-from .stats import GMMTestResults, position_stats
+from .stats import GMMTestResults, position_stats, assign_modified_distribution
 
 logger = logging.getLogger('diffmod')
 
@@ -144,9 +144,11 @@ def test_chunk(opts, gene_ids):
     '''
     run the GMM tests on a subset of gene_ids
     '''
-    model = load_model_priors(opts.prior_model_fn)
     chunk_res = []
     chunk_sm_preds = {}
+
+    gene_ids, random_seed = gene_ids
+    random_state = np.random.default_rng(random_seed)
 
     with hdf5_list(opts.cntrl_hdf5_fns) as cntrl_h5, \
          hdf5_list(opts.treat_hdf5_fns) as treat_h5:
@@ -164,11 +166,10 @@ def test_chunk(opts, gene_ids):
                 was_tested, result, sm = position_stats(
                     cntrl, treat, kmers,
                     max_fit_depth=opts.max_fit_depth,
-                    max_cntrl_vs_exp_emd=opts.max_cntrl_vs_exp_emd,
-                    min_mod_vs_unmod_emd=opts.min_mod_vs_unmod_emd,
+                    min_ks=opts.min_ks,
                     p_val_threshold=opts.fdr_threshold,
-                    model=model,
-                    generate_sm_preds=opts.generate_sm_preds
+                    generate_sm_preds=opts.generate_sm_preds,
+                    random_state=random_state
                 )
                 if was_tested:
                     record = GMMTestRecord.from_records(
@@ -193,7 +194,7 @@ def parallel_test(opts):
          hdf5_list(opts.treat_hdf5_fns) as treat_h5:
 
         gene_ids = sorted(get_shared_keys(cntrl_h5 + treat_h5))
-        gene_id_chunks = np.array_split(gene_ids, opts.processes * 4)
+        gene_id_chunks = np.array_split(gene_ids, opts.processes)
 
     logger.info(
         f'{len(gene_ids):,} genes to be processed on {opts.processes} workers'
@@ -203,7 +204,8 @@ def parallel_test(opts):
             res = []
             sm_preds = {}
             for chunk_res, chunk_sm_preds in pool.imap_unordered(
-                    partial(test_chunk, opts), gene_id_chunks):
+                    partial(test_chunk, opts),
+                    zip(gene_id_chunks, opts.random_seed)):
                 res += chunk_res
                 sm_preds.update(chunk_sm_preds)
     else:
@@ -244,8 +246,7 @@ class GMMTestOpts:
     window_size: int = 5
     min_read_depth: int = 5
     max_fit_depth: int = 1000
-    max_cntrl_vs_exp_emd: float = 1 # needs a click option
-    min_mod_vs_unmod_emd: float = 1
+    min_ks: float = 0.1
     fdr_threshold: float = 0.05
     processes: float = 1
     test_gene: str = None
@@ -254,7 +255,12 @@ class GMMTestOpts:
 
     def __post_init__(self):
         if self.random_seed is None:
-            self.random_seed = abs(hash(self.output_bed_fn))
+            self.random_seed = len(self.output_bed_fn)
+
+        # use seed sequence for processes
+        if self.processes > 1 and self.test_gene is None:
+            ss = np.random.SeedSequence(self.random_seed)
+            self.random_seed = ss.spawn(self.processes)
         self.generate_sm_preds = self.output_sm_preds_fn is not None
 
         
@@ -278,7 +284,7 @@ def make_dataclass_decorator(dc):
 @click.option('-w', '--window-size', required=False, default=5)
 @click.option('-n', '--min-read-depth', required=False, default=5)
 @click.option('-d', '--max-fit-depth', required=False, default=1000)
-@click.option('-e', '--min-mod-vs-unmod_emd', required=False, default=1.)
+@click.option('-k', '--min-ks', required=False, default=0.1)
 @click.option('-f', '--fdr-threshold', required=False, default=0.05)
 @click.option('-p', '--processes', required=False,
               default=1, type=click.IntRange(1, None))
@@ -300,11 +306,14 @@ def gmm_test(opts):
         logger.info(
             f'Testing single gene {opts.test_gene}'
         )
-        res, sm_preds = test_chunk(opts, [opts.test_gene])
+        res, sm_preds = test_chunk(opts, ([opts.test_gene], opts.random_seed))
         res = pd.DataFrame(res)
         _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
 
-    res, sm_preds = filter_results(res, sm_preds, opts.fdr_threshold)
+    res, sm_preds = assign_modified_distribution(
+        *filter_results(res, sm_preds, opts.fdr_threshold),
+        load_model_priors(opts.prior_model_fn)
+    )
 
     save_gmmtest_results(res, opts.output_bed_fn)
     if opts.generate_sm_preds:
