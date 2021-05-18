@@ -357,8 +357,7 @@ def load_model_priors(model_fn=None):
     return m.transpose()
 
 
-def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05,
-                         custom_filter=None):
+def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05):
     '''
     write main results to bed file
     '''

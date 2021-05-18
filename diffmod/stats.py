@@ -122,7 +122,7 @@ def subsample(arr, max_size):
 
 
 def fit_gmm(cntrl, treat, expected_params,
-            max_gmm_fit_depth=1000, min_mod_vs_unmod_emd=0.5):
+            max_fit_depth=1000, min_mod_vs_unmod_emd=0.5):
     '''
     Fits a multivariate, two-gaussian GMM to data and measures KL
     divergence of the resulting distributions.
@@ -131,7 +131,7 @@ def fit_gmm(cntrl, treat, expected_params,
     pooled = cntrl + treat
     samp_sizes = np.array([len(samp) for samp in pooled])
     pooled = [
-        subsample(samp, max_gmm_fit_depth) for samp in pooled
+        subsample(samp, max_fit_depth) for samp in pooled
     ]
     expected, init = generate_init_points(expected_params, 2)
     dists, weights, per_samp_weights = fit_multisamp_gmm(pooled, n_components=2, init=init)
@@ -249,10 +249,10 @@ class GMMTestResults:
 
 
 def position_stats(cntrl, treat, kmers,
-                   max_gmm_fit_depth=1000,
+                   max_fit_depth=1000,
                    max_cntrl_vs_exp_emd=1,
                    min_mod_vs_unmod_emd=0.5,
-                   min_ks=0.1, p_val_threshold=0.05,
+                   min_ks=0.05, p_val_threshold=0.05,
                    model=load_model_priors(),
                    generate_sm_preds=False):
     '''
@@ -279,7 +279,7 @@ def position_stats(cntrl, treat, kmers,
         treat_fit_data = [t.values for _, t in treat.groupby('replicate')]
         gmm, r.emd, exp_emd, cntrl_preds, treat_preds = fit_gmm(
             cntrl_fit_data, treat_fit_data, expected_params,
-            max_gmm_fit_depth, min_mod_vs_unmod_emd
+            max_fit_depth, min_mod_vs_unmod_emd
         )
         # if the KL divergence of the distributions is too small we stop here
         if r.emd >= min_mod_vs_unmod_emd and exp_emd <= max_cntrl_vs_exp_emd and r.emd > exp_emd:
