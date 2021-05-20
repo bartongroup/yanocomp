@@ -8,7 +8,7 @@ import pomegranate as pm
 from .io import load_model_priors
 
 
-def fit_multisamp_gmm(X, n_components, max_iterations=1e8, stop_threshold=0.1,
+def fit_multisamp_gmm(X, max_iterations=1e8, stop_threshold=0.1,
                       inertia=0.01, lr_decay=1e-3, pseudocount=0.5):
     '''
     Fit a gaussian mixture model to multiple samples. Each sample has its own
@@ -16,19 +16,22 @@ def fit_multisamp_gmm(X, n_components, max_iterations=1e8, stop_threshold=0.1,
     a dists and weights both for combined data and for each sample
     '''
     samp_sizes = [len(samp) for samp in X]
+
     X_pooled = np.concatenate(X)
     n_dim = X_pooled.shape[1]
     kmeans = pm.Kmeans(2, init='first-k')
     kmeans.fit(X_pooled, batch_size=100, max_iterations=4)
     init_pred = kmeans.predict(X_pooled)
     dists = [
-        pm.IndependentComponentsDistribution([
-            pm.NormalDistribution.from_samples(X_pooled[init_pred == i, j])
-            for j in range(n_dim)
-        ]) for i in range(n_components)   
+        pm.MultivariateGaussianDistribution.from_samples(X_pooled[init_pred == i])
+        for i in range(2)
+    ]
+    weights = [
+        np.mean(pred) for pred in
+        np.array_split(init_pred, np.cumsum(samp_sizes)[:-1])
     ]
     # dists are shared, weights are not
-    gmms = [pm.GeneralMixtureModel(dists) for _ in X]
+    gmms = [pm.GeneralMixtureModel(dists, [1 - w, w]) for w in weights]
     initial_log_probability_sum = -np.inf
     iteration, improvement = 0, np.inf
     # perform EM
@@ -76,15 +79,19 @@ def fit_gmm(cntrl, treat, centre, max_fit_depth=1000, random_state=None):
     divergence of the resulting distributions.
     '''
     n_cntrl = len(cntrl)
-    pooled = cntrl + treat
-    samp_sizes = np.array([len(samp) for samp in pooled])
+    samp_sizes = np.array([len(samp) for samp in cntrl + treat])
     pooled = [
-        subsample(samp, max_fit_depth, random_state) for samp in pooled
+        subsample(samp, max_fit_depth, random_state) for samp in cntrl + treat
     ]
-    dists, weights, per_samp_weights = fit_multisamp_gmm(pooled, n_components=2)
+    try:
+        dists, weights, per_samp_weights = fit_multisamp_gmm(pooled)
+    except np.core._exceptions.UFuncTypeError:
+        raise np.linalg.LinAlgError
 
-    lower_mean, lower_std = dists[0].distributions[centre].parameters
-    upper_mean, upper_std = dists[1].distributions[centre].parameters
+    lower_mean = dists[0].parameters[0][centre]
+    lower_std = np.sqrt(dists[0].parameters[1][centre][centre])
+    upper_mean = dists[1].parameters[0][centre]
+    upper_std = np.sqrt(dists[1].parameters[1][centre][centre])
 
     if lower_mean > upper_mean:
         # flip model distributions and weights
@@ -169,7 +176,7 @@ class GMMTestResults:
     '''Class for handling results of positional_stats'''
     kmer: str = None
     log_odds: float = np.nan
-    p_val: float = np.nan
+    p_val: float = 1.
     fdr: float = 1.
     cntrl_frac_upper: float = np.nan
     treat_frac_upper: float = np.nan
@@ -186,6 +193,7 @@ class GMMTestResults:
 def position_stats(cntrl, treat, kmers,
                    max_fit_depth=1000,
                    min_ks=0.1, p_val_threshold=0.05,
+                   model_dwell_time=False,
                    generate_sm_preds=False,
                    random_state=None):
     '''
@@ -193,6 +201,10 @@ def position_stats(cntrl, treat, kmers,
     '''
     window_size = len(kmers)
     centre = window_size // 2
+    if not model_dwell_time:
+        # remove dwell time info
+        cntrl = cntrl.iloc[:, :window_size]
+        treat = treat.iloc[:, :window_size]
     kmer = kmers[centre]
     r = GMMTestResults(kmer=kmer)
     # first test that there is actually some difference in cntrl/treat
@@ -205,10 +217,13 @@ def position_stats(cntrl, treat, kmers,
     if r.ks_stat >= min_ks and ks_p_val < p_val_threshold:
         cntrl_fit_data = [c.values for _, c in cntrl.groupby('replicate')]
         treat_fit_data = [t.values for _, t in treat.groupby('replicate')]
-        gmm, cntrl_preds, treat_preds, *fit_params = fit_gmm(
-            cntrl_fit_data, treat_fit_data,
-            centre, max_fit_depth, random_state,
-        )
+        try:
+            gmm, cntrl_preds, treat_preds, *fit_params = fit_gmm(
+                cntrl_fit_data, treat_fit_data,
+                centre, max_fit_depth, random_state,
+            )
+        except np.linalg.LinAlgError:
+            return False, r, None
         r.lower_mean, r.lower_std, r.upper_mean, r.upper_std = fit_params
         r.g_stat, r.hom_g_stat, r.p_val = gmm_g_test(
             cntrl_preds, treat_preds,
@@ -239,6 +254,9 @@ def median_abs_deviation(exp, obs):
 def assign_modified_distribution(results, sm_preds,
                                  model=load_model_priors(),
                                  sample_size=1000):
+    # corner case with no sig results
+    if not len(results):
+        return results, sm_preds
     res_assigned = []
     for kmer, kmer_res in results.groupby('kmer'):
         exp_mean = model.loc['current_mean', kmer]

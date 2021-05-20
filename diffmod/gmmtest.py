@@ -168,6 +168,7 @@ def test_chunk(opts, gene_ids):
                     max_fit_depth=opts.max_fit_depth,
                     min_ks=opts.min_ks,
                     p_val_threshold=opts.fdr_threshold,
+                    model_dwell_time=opts.model_dwell_time,
                     generate_sm_preds=opts.generate_sm_preds,
                     random_state=random_state
                 )
@@ -212,8 +213,14 @@ def parallel_test(opts):
         res, sm_preds = test_chunk(opts, gene_id_chunks[0])
 
     logger.info(f'Complete. Tested {len(res):,} positions')
-    res = pd.DataFrame(res)
-    _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
+    res = pd.DataFrame(
+        res,
+        columns=list(PosRecord.__annotations__.keys()) + \
+                list(GMMTestResults.__annotations__.keys())
+    )
+    res.dropna(subset=['p_val'], inplace=True) # TODO not sure how some nans creep in
+    if len(res):
+        _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
     return res, sm_preds
 
 
@@ -246,6 +253,7 @@ class GMMTestOpts:
     window_size: int = 5
     min_read_depth: int = 5
     max_fit_depth: int = 1000
+    model_dwell_time: bool = False
     min_ks: float = 0.1
     fdr_threshold: float = 0.05
     processes: float = 1
@@ -263,6 +271,15 @@ class GMMTestOpts:
             self.random_seed = ss.spawn(self.processes)
         self.generate_sm_preds = self.output_sm_preds_fn is not None
 
+
+def set_default_depth(ctx, param, val):
+    if val is None:
+        win_size = ctx.params['window_size']
+        val = win_size * 2 # at least as many reads per sample as features
+        logger.warn(f'Default min depth set to {val} to match '
+                    f'window size {win_size}')
+    return val
+        
         
 def make_dataclass_decorator(dc):
     def _dataclass_decorator(cmd):
@@ -282,7 +299,10 @@ def make_dataclass_decorator(dc):
 @click.option('--test-level', required=False, default='gene',
               type=click.Choice(['gene', 'transcript']))
 @click.option('-w', '--window-size', required=False, default=5)
-@click.option('-n', '--min-read-depth', required=False, default=5)
+@click.option('-D', '--model-dwell-time', required=False,
+              default=False, is_flag=True)
+@click.option('-n', '--min-read-depth', required=False, default=None,
+              callback=set_default_depth)
 @click.option('-d', '--max-fit-depth', required=False, default=1000)
 @click.option('-k', '--min-ks', required=False, default=0.1)
 @click.option('-f', '--fdr-threshold', required=False, default=0.05)
@@ -307,8 +327,14 @@ def gmm_test(opts):
             f'Testing single gene {opts.test_gene}'
         )
         res, sm_preds = test_chunk(opts, ([opts.test_gene], opts.random_seed))
-        res = pd.DataFrame(res)
-        _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
+        res = pd.DataFrame(
+            res,
+            columns=list(PosRecord.__annotations__.keys()) + \
+                    list(GMMTestResults.__annotations__.keys())
+        )
+        res.dropna(subset=['p_val'], inplace=True)
+        if len(res):
+            _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
 
     res, sm_preds = assign_modified_distribution(
         *filter_results(res, sm_preds, opts.fdr_threshold),
