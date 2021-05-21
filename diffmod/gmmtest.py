@@ -164,12 +164,7 @@ def test_chunk(opts, gene_ids):
             )
             for pos, feature_id, kmers, cntrl, treat in pos_iter:
                 was_tested, result, sm = position_stats(
-                    cntrl, treat, kmers,
-                    max_fit_depth=opts.max_fit_depth,
-                    min_ks=opts.min_ks,
-                    p_val_threshold=opts.fdr_threshold,
-                    model_dwell_time=opts.model_dwell_time,
-                    generate_sm_preds=opts.generate_sm_preds,
+                    cntrl, treat, kmers, opts,
                     random_state=random_state
                 )
                 if was_tested:
@@ -254,6 +249,9 @@ class GMMTestOpts:
     min_read_depth: int = 5
     max_fit_depth: int = 1000
     model_dwell_time: bool = False
+    add_uniform: bool = True
+    outlier_factor: float = 0.5
+    max_std: float = np.inf
     min_ks: float = 0.1
     fdr_threshold: float = 0.05
     processes: float = 1
@@ -301,9 +299,12 @@ def make_dataclass_decorator(dc):
 @click.option('-w', '--window-size', required=False, default=5)
 @click.option('-D', '--model-dwell-time', required=False,
               default=False, is_flag=True)
+@click.option('-u', '--add-uniform/--no-uniform', required=False, default=True)
+@click.option('-e', '--outlier-factor', required=False, default=0.5)
 @click.option('-n', '--min-read-depth', required=False, default=None,
               callback=set_default_depth)
 @click.option('-d', '--max-fit-depth', required=False, default=1000)
+@click.option('-v', '--max-std', required=False, default=np.inf, hidden=True)
 @click.option('-k', '--min-ks', required=False, default=0.1)
 @click.option('-f', '--fdr-threshold', required=False, default=0.05)
 @click.option('-p', '--processes', required=False,
