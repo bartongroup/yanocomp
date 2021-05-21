@@ -1,7 +1,7 @@
 # yanocomp
 ### (yet another nanopore modification comparison tool)
 
-`yanocomp` does detection of RNA modifications from nanopore direct RNA sequencing (DRS) data which has been "eventaligned" using `nanopolish`. It uses a comparative approach with General mixture models similar to those used by [`nanocompore`](https://github.com/tleonardi/nanocompore) and [`xpore`](https://github.com/GoekeLab/xpore). The main selling points of `yanocomp` are:
+`yanocomp` does detection of RNA modifications from nanopore direct RNA sequencing (DRS) data which has been "eventaligned" using [`nanopolish`](https://github.com/jts/nanopolish). It uses a comparative approach with General mixture models similar to those used by [`nanocompore`](https://github.com/tleonardi/nanocompore) and [`xpore`](https://github.com/GoekeLab/xpore). The main selling points of `yanocomp` are:
 
 * It parses nanopolish eventalign output on the fly into a (relatively) compact HDF5 file allowing random access.
 * A GTF file can be provided to convert transcriptomic coordinates from eventalign back to genomic coordinates.
@@ -30,7 +30,7 @@ pip install git+git://github.com/bartongroup/yanocomp.git
 
 ## Usage:
 
-Before running `yanocomp`, you should align your nanopore DRS data to a transcriptome reference (with no spliced alignment, no secondary alignments), for example using `minimap2`. You should then align the signal level data using [`nanopolish`](https://github.com/jts/nanopolish) with the command:
+Before running `yanocomp`, you should align your nanopore DRS data to a transcriptome reference (with no spliced alignment, no secondary alignments), for example using [`minimap2`](https://github.com/lh3/minimap2). You should then align the signal level data using [`nanopolish`](https://github.com/jts/nanopolish) with the command:
 
 ```
 nanopolish eventalign \
