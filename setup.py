@@ -2,7 +2,7 @@ from setuptools import setup
 
 
 setup(
-    name='diffmod',
+    name='yanocomp',
     version='0.1',
     description=(
         'GMM tests for analysis of differential RNA modifications'
@@ -10,11 +10,11 @@ setup(
     author='Matthew Parker',
     entry_points={
         'console_scripts': [
-            'diffmod = diffmod.cli:cli',
+            'yanocomp = yanocomp.cli:cli',
         ]
     },
     packages=[
-        'diffmod',
+        'yanocomp',
     ],
     install_requires=[
         'numpy',
