@@ -33,7 +33,7 @@ pip install git+git://github.com/bartongroup/yanocomp.git
 Before running `yanocomp`, you should align your nanopore DRS data to a transcriptome reference (with no spliced alignment, no secondary alignments), for example using `minimap2`. You should then align the signal level data using `nanopolish eventalign` with the command:
 
 ```
-nanopolish \
+nanopolish eventalign \
   --scale-events \
   --signal-index \
   --print-read-names \
