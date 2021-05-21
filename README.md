@@ -7,7 +7,7 @@
 * A GTF file can be provided to convert transcriptomic coordinates from eventalign back to genomic coordinates.
 * It uses [`pomegranate`](https://github.com/jmschrei/pomegranate) for model fitting (which makes it fast!).
 * It fits models using multiple adjacent kmers to better separate modified and unmodified distributions.
-* A uniform distribution is used to model outliers caused by low quallity signal or poor alignment. This improves the fit and reduces false positives.
+* A uniform distribution is used to model outliers caused by low quality signal or poor alignment. This improves the fit and reduces false positives.
 
 For the comparative method, you will need nanopore DRS data from a control sample with normal levels of modifications and a treatment sample with altered levels of modifications. NB: `yanocomp` is still in quite a beta stage so there are likely to be bugs!
 
