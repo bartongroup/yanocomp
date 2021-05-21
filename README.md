@@ -19,6 +19,7 @@ For the comparative method, you will need nanopore DRS data from a control sampl
 git clone https://github.com/bartongroup/yanocomp.git
 cd yanocomp
 conda env create -f yanocomp.yml
+conda activate yanocomp
 ```
 
 Alternatively `yanosim` and the required packages can be installed using pip:

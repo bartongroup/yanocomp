@@ -207,7 +207,7 @@ def parallel_test(opts):
                 res += chunk_res
                 sm_preds.update(chunk_sm_preds)
     else:
-        res, sm_preds = test_chunk(opts, gene_id_chunks[0])
+        res, sm_preds = test_chunk(opts, (gene_id_chunks[0], opts.random_seed))
 
     logger.info(f'Complete. Tested {len(res):,} positions')
     res = pd.DataFrame(

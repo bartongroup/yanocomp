@@ -1,0 +1,18 @@
+name: yanocomp
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - pip
+  - python>=3.8
+  - numpy
+  - scipy
+  - pandas>=1.1
+  - statsmodels
+  - pomegranate>=0.13.3
+  - joblib=0.17.0 # pomegranate incompatible with joblib 1.0
+  - h5py=2.10.0
+  - click
+  - pip:
+     - click_log
+     - .
