@@ -9,12 +9,14 @@ from statsmodels.stats.multitest import multipletests
 
 import click
 
+from .opts import make_dataclass_decorator
 from .io import (
     hdf5_list, get_shared_keys, load_model_priors,
     load_gene_kmers, load_gene_events, load_gene_attrs,
     save_gmmtest_results, save_sm_preds
 )
 from .stats import GMMTestResults, position_stats, assign_modified_distribution
+
 
 logger = logging.getLogger('yanocomp')
 
@@ -259,19 +261,6 @@ class GMMTestOpts:
             ss = np.random.SeedSequence(self.random_seed)
             self.random_seed = ss.spawn(self.processes)
         self.generate_sm_preds = self.output_sm_preds_fn is not None
-        
-        
-def make_dataclass_decorator(cls_name, **kwargs):
-    def _dataclass_decorator(cmd):
-        @click.pass_context
-        def _make_dataclass(ctx, **cli_kwargs):
-            fields = [
-                (kw, type(val), val) for kw, val in cli_kwargs.items()
-            ]
-            dc = dataclasses.make_dataclass(cls_name, fields, **kwargs)
-            return ctx.invoke(cmd, dc())
-        return _make_dataclass
-    return _dataclass_decorator
 
 
 @click.command()
@@ -285,9 +274,9 @@ def make_dataclass_decorator(cls_name, **kwargs):
 @click.option('-m', '--prior-model-fn', required=False, default=None,
               help='Model file with expected kmer current distributions')
 @click.option('--test-level', required=False, default='gene',
-              type=click.Choice(['gene', 'transcript']),
+              type=click.Choice(['gene', 'transcript']), show_default=True,
               help='Test at transcript level or aggregate to gene level')
-@click.option('-w', '--window-size', required=False, default=5,
+@click.option('-w', '--window-size', required=False, default=5, show_default=True,
               help='How many adjacent kmers to model over')
 @click.option('-D', '--model-dwell-time', required=False,
               default=False, is_flag=True, hidden=True,
@@ -295,21 +284,21 @@ def make_dataclass_decorator(cls_name, **kwargs):
 @click.option('-u', '--add-uniform/--no-uniform', required=False, default=True, hidden=True,
               help=('Whether to include a uniform component in GMMs to detect outliers caused by '
                     'alignment errors. Helps to improve the robustness of the modelling'))
-@click.option('-e', '--outlier-factor', required=False, default=0.5,
+@click.option('-e', '--outlier-factor', required=False, default=0.5, show_default=True,
               help=('Scaling factor for labelling outliers during model initialisation. '
                     'Smaller means more aggressive labelling of outliers'))
 @click.option('-n', '--min-read-depth', required=False, default=None,
               callback=set_default_depth,
-              help='Minimum reads per replicate to test a position')
-@click.option('-d', '--max-fit-depth', required=False, default=1000,
+              help='Minimum reads per replicate to test a position. Default is to set dynamically')
+@click.option('-d', '--max-fit-depth', required=False, default=1000, show_default=True,
               help='Maximum number of reads per replicate used to fit the model')
 @click.option('-v', '--max-std', required=False, default=np.inf, hidden=True,
               help='Filter positions where model fits have large variance')
-@click.option('-k', '--min-ks', required=False, default=0.1,
-              help='Minimum KS test statistic to build a model for a position')
-@click.option('-f', '--fdr-threshold', required=False, default=0.05,
+@click.option('-k', '--min-ks', required=False, default=0.1, show_default=True,
+              help='Minimum KS test statistic to attempt to build a model for a position')
+@click.option('-f', '--fdr-threshold', required=False, default=0.05, show_default=True,
               help='False discovery rate threshold for output')
-@click.option('-p', '--processes', required=False,
+@click.option('-p', '--processes', required=False, show_default=True,
               default=1, type=click.IntRange(1, None))
 @click.option('--test-gene', required=False, default=None, hidden=True)
 @click.option('--random-seed', required=False, default=None, hidden=True)

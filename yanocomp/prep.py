@@ -9,6 +9,7 @@ import multiprocessing as mp
 import numpy as np
 import click
 
+from .opts import make_dataclass_decorator
 from .io import parse_eventalign, load_gtf_database, save_events_to_hdf5
 
 logger = logging.getLogger('yanocomp')
@@ -157,19 +158,30 @@ def parallel_collapse(ea_fn, gtf_fn, processes, chunksize):
 
 
 @click.command()
-@click.option('-e', '--eventalign-fn', required=False, default='-')
-@click.option('-h', '--hdf5-fn', required=True)
-@click.option('-g', '--gtf-fn', required=False, default=None)
-@click.option('-p', '--processes', required=False, default=1)
-@click.option('-n', '--chunksize', required=False, default=1_000_000)
-def nanopolish_collapse(eventalign_fn, hdf5_fn, gtf_fn, processes, chunksize):
+@click.option('-e', '--eventalign-fn', required=False, default='-', show_default=True,
+              help=('File containing output of nanopolish eventalign. '
+                    'Can be gzipped. Use - to read from stdin'))
+@click.option('-h', '--hdf5-fn', required=True,
+              help='Output HDF5 file')
+@click.option('-g', '--gtf-fn', required=False, default=None,
+              help=('Optional GTF file which can be used to convert '
+                    'transcriptomic coordinates to genomic'))
+@click.option('-p', '--processes', required=False, default=1, show_default=True)
+@click.option('-n', '--chunksize', required=False, default=1_000_000, hidden=True)
+@make_dataclass_decorator('CollapseOpts')
+def nanopolish_collapse(opts):
     '''
     Parse nanopolish eventalign tabular data into a more managable
     HDF5 format...
     '''
     save_events_to_hdf5(
-        parallel_collapse(eventalign_fn, gtf_fn, processes, chunksize),
-        hdf5_fn
+        parallel_collapse(
+            opts.eventalign_fn,
+            opts.gtf_fn,
+            opts.processes,
+            opts.chunksize
+        ),
+        opts.hdf5_fn
     )
 
 
