@@ -9,7 +9,7 @@ from statsmodels.stats.multitest import multipletests
 
 import click
 
-from .opts import make_dataclass_decorator
+from .opts import make_dataclass_decorator, dynamic_dataclass
 from .io import (
     hdf5_list, get_shared_keys, load_model_priors,
     load_gene_kmers, load_gene_events, load_gene_attrs,
@@ -146,6 +146,8 @@ def test_chunk(opts, gene_ids):
     '''
     run the GMM tests on a subset of gene_ids
     '''
+    # convert back to dataclass (have to convert to dict for pickling)
+    opts = dynamic_dataclass('GMMTestOpts', bases=(GMMTestOpts,), **opts)
     chunk_res = []
     chunk_sm_preds = {}
 
@@ -188,6 +190,10 @@ def parallel_test(opts):
     Runs the GMM tests on positions from gene_ids which are found in all HDF5.
     Gene ids are processed as parallel chunks.
     '''
+    # use seed sequence for processes
+    ss = np.random.SeedSequence(opts.random_seed)
+    random_seeds = list(ss.spawn(opts.processes))
+
     with hdf5_list(opts.cntrl_hdf5_fns) as cntrl_h5, \
          hdf5_list(opts.treat_hdf5_fns) as treat_h5:
 
@@ -202,12 +208,15 @@ def parallel_test(opts):
             res = []
             sm_preds = {}
             for chunk_res, chunk_sm_preds in pool.imap_unordered(
-                    partial(test_chunk, opts),
-                    zip(gene_id_chunks, opts.random_seed)):
+                    partial(test_chunk, dataclasses.asdict(opts)),
+                    zip(gene_id_chunks, random_seeds)):
                 res += chunk_res
                 sm_preds.update(chunk_sm_preds)
     else:
-        res, sm_preds = test_chunk(opts, (gene_id_chunks[0], opts.random_seed))
+        res, sm_preds = test_chunk(
+            dataclasses.asdict(opts),
+            (gene_id_chunks[0], opts.random_seed)
+        )
 
     logger.info(f'Complete. Tested {len(res):,} positions')
     res = pd.DataFrame(
@@ -256,10 +265,6 @@ class GMMTestOpts:
         if self.random_seed is None:
             self.random_seed = len(self.output_bed_fn)
 
-        # use seed sequence for processes
-        if self.processes > 1 and self.test_gene is None:
-            ss = np.random.SeedSequence(self.random_seed)
-            self.random_seed = ss.spawn(self.processes)
         self.generate_sm_preds = self.output_sm_preds_fn is not None
 
 
@@ -318,7 +323,10 @@ def gmm_test(opts):
         logger.info(
             f'Testing single gene {opts.test_gene}'
         )
-        res, sm_preds = test_chunk(opts, ([opts.test_gene], opts.random_seed))
+        res, sm_preds = test_chunk(
+            dataclasses.asdict(opts),
+            ([opts.test_gene], opts.random_seed)
+        )
         res = pd.DataFrame(
             res,
             columns=list(PosRecord.__annotations__.keys()) + \

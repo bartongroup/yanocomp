@@ -387,7 +387,7 @@ def assign_modified_distribution(results, sm_preds,
             kmer_res.loc[:, 'current_shift_dir'] = 'l'
             kmer_res.loc[:, 'cntrl_frac_upper'] = 1 - kmer_res.loc[:, 'cntrl_frac_upper']
             kmer_res.loc[:, 'treat_frac_upper'] = 1 - kmer_res.loc[:, 'treat_frac_upper']
-            kmer_res.loc[:, 'log_odds'] = 
+            kmer_res.loc[:, 'log_odds'] = np.negative(kmer_res.loc[:, 'log_odds'])
             kmer_res.loc[:, ['lower_mean','upper_mean']] = (
                 kmer_res.loc[:, ['upper_mean','lower_mean']].values
             )

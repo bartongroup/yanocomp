@@ -2,15 +2,18 @@ import dataclasses
 import click
 
 
-def make_dataclass_decorator(cls_name, **kwargs):
+def dynamic_dataclass(cls_name, bases=None, **kwargs):
+    fields = [
+        (kw, type(val), val) for kw, val in kwargs.items()
+    ]
+    dc = dataclasses.make_dataclass(cls_name, fields, bases=bases)
+    return dc()
+
+
+def make_dataclass_decorator(cls_name, bases=None):
     def _dataclass_decorator(cmd):
-        @click.pass_context
-        def _make_dataclass(ctx, **cli_kwargs):
-            fields = [
-                (kw, type(val), val) for kw, val in cli_kwargs.items()
-            ]
-            dc = dataclasses.make_dataclass(cls_name, fields, **kwargs)
-            return ctx.invoke(cmd, dc())
+        def _make_dataclass(**cli_kwargs):
+            return cmd(dynamic_dataclass(cls_name, bases=bases, **cli_kwargs))
         # pass docstring
         _make_dataclass.__doc__ = cmd.__doc__
         return _make_dataclass
