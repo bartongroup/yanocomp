@@ -244,7 +244,9 @@ def calculate_fractional_stats(cntrl_preds, treat_preds, pseudocount=0.5):
         (treat_pred[1] + pseudocount) / 
         (treat_pred[:N_COMPONENTS].sum() + pseudocount)
     )
-    log_odds = np.log2(treat_frac_upper) - np.log2(cntrl_frac_upper)
+    # symmetric log odds ratio
+    log_odds = (np.log2(treat_frac_upper) - (1 - np.log2(treat_frac_upper))) - \
+               (np.log2(cntrl_frac_upper) - (1 - np.log2(cntrl_frac_upper)))
     return cntrl_frac_upper, treat_frac_upper, log_odds
 
 
@@ -341,6 +343,17 @@ def position_stats(cntrl, treat, kmers,
             treat_probs = gmm.predict_proba(np.concatenate(treat_fit_data))[:, 1]
             sm_preds = {
                 'kmers' : kmers.tolist(),
+                'model': {
+                    'unmod': {
+                        'mu': gmm.distributions[0].mu,
+                        'cov': gmm.distributions[0].cov,
+                    },
+                    'mod': {
+                        'mu': gmm.distributions[1].mu,
+                        'cov': gmm.distributions[1].cov,
+                    },
+                    'weights': np.exp(gmm.weights)
+                },
                 'cntrl' : format_sm_preds(cntrl_probs, cntrl),
                 'treat' : format_sm_preds(treat_probs, treat),
             }
@@ -374,7 +387,7 @@ def assign_modified_distribution(results, sm_preds,
             kmer_res.loc[:, 'current_shift_dir'] = 'l'
             kmer_res.loc[:, 'cntrl_frac_upper'] = 1 - kmer_res.loc[:, 'cntrl_frac_upper']
             kmer_res.loc[:, 'treat_frac_upper'] = 1 - kmer_res.loc[:, 'treat_frac_upper']
-            kmer_res.loc[:, 'log_odds'] = np.negative(kmer_res.loc[:, 'log_odds'])
+            kmer_res.loc[:, 'log_odds'] = 
             kmer_res.loc[:, ['lower_mean','upper_mean']] = (
                 kmer_res.loc[:, ['upper_mean','lower_mean']].values
             )
@@ -387,6 +400,8 @@ def assign_modified_distribution(results, sm_preds,
                     pos_sm_preds = sm_preds[gene_id][pos]
                 except KeyError:
                     continue
+                model = pos_sm_preds['model']
+                model['unmod'], model['mod'] = model['mod'], model['unmod']
                 for cond in ['cntrl', 'treat']:
                     for rep_sm_preds in pos_sm_preds[cond].values():
                         rep_sm_preds['preds'] = [

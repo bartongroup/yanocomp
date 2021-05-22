@@ -8,6 +8,7 @@
 * It uses [`pomegranate`](https://github.com/jmschrei/pomegranate) for model fitting (which makes it fast!).
 * It fits models using multiple adjacent kmers to better separate modified and unmodified distributions.
 * A uniform distribution is used to model outliers caused by low quality signal or poor alignment. This improves the fit and reduces false positives.
+* The trained models can be used to make single molecule modification predictions for each read at each significant position.
 
 For the comparative method, you will need nanopore DRS data from a control sample with normal levels of modifications and a treatment sample with altered levels of modifications. NB: `yanocomp` is still in quite a beta stage so there are likely to be bugs!
 
@@ -167,6 +168,17 @@ A 19-column BED file format with the following values:
         "$gene_id": {
             "$pos": {
                 "kmers": [...], # array of strings, shape (window_size,)
+                "model": {
+                    "unmod": {
+                        "mu": [...], # array of floats, shape (window_size,)
+                        "cov": [...], # array of floats, shape (window_size, window_size)
+                    },
+                    "mod": {
+                        "mu": [...],
+                        "cov": [...],
+                    },
+                    weights: [...] # array of floats, shape (2,)
+                },
                 "cntrl": {
                     "$rep": {
                         "read_ids": [...], # array of strings, shape (nreads,)
