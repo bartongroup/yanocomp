@@ -251,7 +251,7 @@ def filter_results(res, sm_preds, fdr_threshold):
 def set_default_depth(ctx, param, val):
     if val is None:
         win_size = ctx.params['window_size']
-        val = win_size * 2 # at least as many reads per sample as features
+        val = max(win_size * 2, 5) # at least as many reads per sample as features
         logger.warn(f'Default min depth set to {val} to match '
                     f'window size {win_size}')
     return val
@@ -292,7 +292,7 @@ class GMMTestOpts:
 @click.option('-e', '--outlier-factor', required=False, default=0.5, show_default=True,
               help=('Scaling factor for labelling outliers during model initialisation. '
                     'Smaller means more aggressive labelling of outliers'))
-@click.option('-n', '--min-read-depth', required=False, default=None,
+@click.option('-n', '--min-read-depth', required=False, default=None, type=int,
               callback=set_default_depth,
               help='Minimum reads per replicate to test a position. Default is to set dynamically')
 @click.option('-d', '--max-fit-depth', required=False, default=1000, show_default=True,
@@ -316,7 +316,6 @@ def gmm_test(opts):
         f'Running gmmtest with {len(opts.cntrl_hdf5_fns):,} control '
         f'datasets and {len(opts.treat_hdf5_fns):,} treatment datasets'
     )
-
     if opts.test_gene is None:
         res, sm_preds = parallel_test(opts)
     else:

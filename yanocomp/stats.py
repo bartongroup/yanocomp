@@ -2,6 +2,7 @@ import dataclasses
 
 import numpy as np
 import pandas as pd
+from statsmodels.multivariate.pca import PCA
 from scipy import stats
 import pomegranate as pm
 
@@ -9,6 +10,14 @@ from .io import load_model_priors
 
 
 N_COMPONENTS = 2
+
+
+def pca_kstest(cntrl_data, treat_data):
+    n_cntrl = len(cntrl_data)
+    pooled = np.concatenate([cntrl_data, treat_data])
+    comps = PCA(pooled, 1).factors.ravel()
+    ks, p_val = stats.ks_2samp(comps[:n_cntrl], comps[n_cntrl:])
+    return ks, p_val
 
 
 def median_absolute_deviation(arr):
@@ -186,10 +195,6 @@ def fit_gmm(cntrl, treat, centre, add_uniform=True,
     # use weights to estimate per-sample mod rates
     preds = np.round(per_samp_weights * samp_sizes[:, np.newaxis])
     cntrl_preds, treat_preds = preds[:n_cntrl], preds[n_cntrl:]
-    if add_uniform:
-        # remove uniform for later single molecule preds
-        dists = dists[:2]
-        weights = weights[:2] / weights[:2].sum()
     gmm = pm.GeneralMixtureModel(dists, weights)
     return gmm, cntrl_preds, treat_preds, *params
 
@@ -250,24 +255,48 @@ def calculate_fractional_stats(cntrl_preds, treat_preds, pseudocount=0.5):
     return cntrl_frac_upper, treat_frac_upper, log_odds
 
 
-def format_sm_preds(sm_preds, events):
+def format_sm_preds(sm_preds, sm_outlier, events):
     reps = events.index.get_level_values('replicate').tolist()
     read_ids = events.index.get_level_values('read_idx').tolist()
     events = events.values.tolist()
     sm_preds = sm_preds.tolist()
+    sm_outlier = sm_outlier.tolist()
     sm_preds_dict = {}
-    for r_id, rep, ev, p in zip(read_ids, reps, events, sm_preds):
+    for r_id, rep, ev, p, o in zip(read_ids, reps, events, sm_preds, sm_outlier):
         try:
             sm_preds_dict[rep]['read_ids'].append(r_id)
         except KeyError:
             sm_preds_dict[rep] = {
                 'read_ids': [r_id,],
                 'events': [],
-                'preds': []
+                'preds': [],
+                'outlier_preds': [],
             }
         sm_preds_dict[rep]['events'].append(ev)
         sm_preds_dict[rep]['preds'].append(p)
+        sm_preds_dict[rep]['outlier_preds'].append(o)
     return sm_preds_dict
+
+
+def format_model(gmm):
+    model_json = {
+        'unmod': {
+            'mu': gmm.distributions[0].mu.tolist(),
+            'cov': gmm.distributions[0].cov.tolist(),
+        },
+        'mod': {
+            'mu': gmm.distributions[1].mu.tolist(),
+            'cov': gmm.distributions[1].cov.tolist(),
+        },
+    }
+    if len(gmm.distributions) == (N_COMPONENTS + 1):
+        outlier = gmm.distributions[2]
+        model_json['outlier'] = {
+            'bounds': [u.parameters for u in outlier.distributions]
+        }
+    model_json['weights'] =  np.exp(gmm.weights).tolist()
+    return model_json
+    
 
 
 @dataclasses.dataclass
@@ -303,11 +332,8 @@ def position_stats(cntrl, treat, kmers,
     kmer = kmers[centre]
     r = GMMTestResults(kmer=kmer)
     # first test that there is actually some difference in cntrl/treat
-    # easiest way to do this is to just test the central kmer...
-    r.ks_stat, ks_p_val = stats.ks_2samp(
-        cntrl['mean'].values[:, centre],
-        treat['mean'].values[:, centre],
-    )
+    r.ks_stat, ks_p_val = pca_kstest(cntrl.values, treat.values)
+
     # if there is we can perform the GMM fit and subsequent G test
     if r.ks_stat >= opts.min_ks and ks_p_val < opts.fdr_threshold:
         cntrl_fit_data = [c.values for _, c in cntrl.groupby('replicate', sort=False)]
@@ -339,23 +365,19 @@ def position_stats(cntrl, treat, kmers,
             cntrl_preds, treat_preds
         )
         if r.p_val < opts.fdr_threshold and opts.generate_sm_preds:
-            cntrl_probs = gmm.predict_proba(np.concatenate(cntrl_fit_data))[:, 1]
-            treat_probs = gmm.predict_proba(np.concatenate(treat_fit_data))[:, 1]
+            cntrl_prob = gmm.predict_proba(np.concatenate(cntrl_fit_data))[:, 1:].T
+            treat_prob = gmm.predict_proba(np.concatenate(treat_fit_data))[:, 1:].T
+            if opts.add_uniform:
+                cntrl_prob, cntrl_outlier = cntrl_prob
+                treat_prob, treat_outlier = treat_prob
+            else:
+                cntrl_outlier = np.zeros_like(cntrl_prob)
+                treat_outlier = np.zeros_like(treat_prob)
             sm_preds = {
-                'kmers' : kmers.tolist(),
-                'model': {
-                    'unmod': {
-                        'mu': gmm.distributions[0].mu,
-                        'cov': gmm.distributions[0].cov,
-                    },
-                    'mod': {
-                        'mu': gmm.distributions[1].mu,
-                        'cov': gmm.distributions[1].cov,
-                    },
-                    'weights': np.exp(gmm.weights)
-                },
-                'cntrl' : format_sm_preds(cntrl_probs, cntrl),
-                'treat' : format_sm_preds(treat_probs, treat),
+                'kmers': kmers.tolist(),
+                'model': format_model(gmm),
+                'cntrl': format_sm_preds(cntrl_prob, cntrl_outlier, cntrl),
+                'treat': format_sm_preds(treat_prob, treat_outlier, treat),
             }
         else:
             sm_preds = None
@@ -400,12 +422,13 @@ def assign_modified_distribution(results, sm_preds,
                     pos_sm_preds = sm_preds[gene_id][pos]
                 except KeyError:
                     continue
-                model = pos_sm_preds['model']
-                model['unmod'], model['mod'] = model['mod'], model['unmod']
+                m = pos_sm_preds['model']
+                m['unmod'], m['mod'] = m['mod'], m['unmod']
                 for cond in ['cntrl', 'treat']:
                     for rep_sm_preds in pos_sm_preds[cond].values():
                         rep_sm_preds['preds'] = [
-                            1 - p for p in rep_sm_preds['preds']
+                            1 - (p + o) for p, o in zip(rep_sm_preds['preds'],
+                                                        rep_sm_preds['outlier_preds'])
                         ]
         res_assigned.append(kmer_res)
     results = pd.concat(res_assigned)

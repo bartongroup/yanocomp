@@ -2,7 +2,7 @@ import dataclasses
 import click
 
 
-def dynamic_dataclass(cls_name, bases=None, **kwargs):
+def dynamic_dataclass(cls_name, bases=tuple(), **kwargs):
     fields = [
         (kw, type(val), val) for kw, val in kwargs.items()
     ]
@@ -10,7 +10,7 @@ def dynamic_dataclass(cls_name, bases=None, **kwargs):
     return dc()
 
 
-def make_dataclass_decorator(cls_name, bases=None):
+def make_dataclass_decorator(cls_name, bases=tuple()):
     def _dataclass_decorator(cmd):
         def _make_dataclass(**cli_kwargs):
             return cmd(dynamic_dataclass(cls_name, bases=bases, **cli_kwargs))
