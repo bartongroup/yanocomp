@@ -13,6 +13,10 @@ N_COMPONENTS = 2
 
 
 def pca_kstest(cntrl_data, treat_data):
+    '''
+    Transform multivariate data to univariate using PCA and perform
+    Kolmogorov-Smirnov test
+    '''
     n_cntrl = len(cntrl_data)
     pooled = np.concatenate([cntrl_data, treat_data])
     comps = PCA(pooled, 1).factors.ravel()
@@ -21,11 +25,17 @@ def pca_kstest(cntrl_data, treat_data):
 
 
 def median_absolute_deviation(arr):
+    '''Returns the MAD of an array'''
     return np.median(np.abs(arr - np.median(arr)))
 
 
 def kmeans_init_clusters(X, detect_outliers=True, init_method='first-k',
                          batch_size=100, max_iter=4, outlier_factor=0.5):
+    '''
+    Get predictions for initialising GMM using KMeans. Outliers are detected
+    by calculating the MAD of the distances to the nearest centroid, and then
+    labelling all values with a dist of > outlier_factor * MAD as outliers.
+    '''
     kmeans = pm.Kmeans(N_COMPONENTS, init=init_method)
     kmeans.fit(X, batch_size=batch_size, max_iterations=max_iter)
     centroid_dists = kmeans.distance(X)
@@ -130,6 +140,8 @@ def fit_multisamp_gmm(X, add_uniform=True, outlier_factor=0.5):
 
     except np.core._exceptions.UFuncTypeError:
         # sometimes small sample sizes cause fitting errors
+        # actual error is caused by casting error for complex numbers
+        # in pomegranate - see https://github.com/jmschrei/pomegranate/issues/633
         raise np.linalg.LinAlgError
 
     samp_sizes = [len(samp) for samp in X]
@@ -139,6 +151,7 @@ def fit_multisamp_gmm(X, add_uniform=True, outlier_factor=0.5):
 
 
 def subsample(arr, max_size, random_state):
+    '''If arr is longer than max_size, subsamples without replacement'''
     if len(arr) <= max_size:
         return arr
     else:
@@ -148,6 +161,10 @@ def subsample(arr, max_size, random_state):
 
 
 def orient_dists(dists, weights, per_samp_weights, centre):
+    '''
+    Orients distributions of a GMM so that the mus are in ascending
+    order for the central kmer.
+    '''
     assert 1 < len(dists) < 4
     has_uniform = len(dists) == 3
     lower_mean = dists[0].mu[centre]
@@ -239,6 +256,10 @@ def gmm_g_test(cntrl_preds, treat_preds, p_val_threshold=0.05):
 
 
 def calculate_fractional_stats(cntrl_preds, treat_preds, pseudocount=0.5):
+    '''
+    Returns the relative modification rates (ignoring outliers) for treat
+    and cntrl samples. Also calculates log ratio of mod:unmod reads.
+    '''
     cntrl_pred = cntrl_preds.sum(0)
     treat_pred = treat_preds.sum(0)
     cntrl_frac_upper = (
@@ -256,6 +277,7 @@ def calculate_fractional_stats(cntrl_preds, treat_preds, pseudocount=0.5):
 
 
 def format_sm_preds(sm_preds, sm_outlier, events):
+    '''Create a json serialisable dict of single molecule predictions'''
     reps = events.index.get_level_values('replicate').tolist()
     read_ids = events.index.get_level_values('read_idx').tolist()
     events = events.values.tolist()
@@ -279,6 +301,7 @@ def format_sm_preds(sm_preds, sm_outlier, events):
 
 
 def format_model(gmm):
+    '''Create a json serialisable dict of GMM parameters'''
     model_json = {
         'unmod': {
             'mu': gmm.distributions[0].mu.tolist(),
@@ -387,12 +410,18 @@ def position_stats(cntrl, treat, kmers,
 
 
 def median_absolute_deviation_score(exp, obs):
+    '''Calculates the MAD score of an array compared to an expected value'''
     return np.median(np.abs(obs - exp))
 
 
 def assign_modified_distribution(results, sm_preds,
                                  model=load_model_priors(),
                                  sample_size=1000):
+    '''
+    Given all significant kmer results, predict for each kmer which distribution
+    (i.e. upper or lower) is most likely to be modified using an existing model
+    of nanopore current.    
+    '''
     # corner case with no sig results
     if not len(results):
         return results, sm_preds
