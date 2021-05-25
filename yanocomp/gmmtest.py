@@ -22,9 +22,9 @@ logger = logging.getLogger('yanocomp')
 
 
 def get_valid_pos(events, min_read_depth):
-    depth = (events['mean'].notnull()
-                           .groupby('replicate')
-                           .sum())
+    depth = (events.notnull()
+                   .groupby('replicate', sort=False)
+                   .sum())
     at_min_read_depth = (depth >= min_read_depth).all(0)
     valid_pos = at_min_read_depth.loc[at_min_read_depth].index.values
     return set(valid_pos)
@@ -49,20 +49,14 @@ def get_cntrl_treat_valid_pos(cntrl_events, treat_events, reverse,
 
 
 def index_pos_range(events, win):
-    # bug #22797 in pandas makes this difficult
-    #events = events.loc[:, pd.IndexSlice[:, win]]
-    idx = pd.MultiIndex.from_arrays([
-        np.repeat(['mean', 'duration'], len(win)),
-        np.tile(win, 2)
-    ])
-    events = events.reindex(idx, axis=1)
+    events = events.loc[:, win]
     events = events.dropna(axis=0)
     return events
 
 
 def test_depth(cntrl_pos_events, treat_pos_events, min_read_depth=10):
-    cntrl_depth = cntrl_pos_events.groupby(level='replicate').size()
-    treat_depth = treat_pos_events.groupby(level='replicate').size()
+    cntrl_depth = cntrl_pos_events.groupby(level='replicate', sort=False).size()
+    treat_depth = treat_pos_events.groupby(level='replicate', sort=False).size()
     return ((cntrl_depth >= min_read_depth).all() and 
             (treat_depth >= min_read_depth).all())
 
@@ -283,9 +277,6 @@ class GMMTestOpts:
               help='Test at transcript level or aggregate to gene level')
 @click.option('-w', '--window-size', required=False, default=5, show_default=True,
               help='How many adjacent kmers to model over')
-@click.option('-D', '--model-dwell-time', required=False,
-              default=False, is_flag=True, hidden=True,
-              help='Whether to include dwell time in models')
 @click.option('-u', '--add-uniform/--no-uniform', required=False, default=True, hidden=True,
               help=('Whether to include a uniform component in GMMs to detect outliers caused by '
                     'alignment errors. Helps to improve the robustness of the modelling'))
@@ -331,6 +322,7 @@ def gmm_test(opts):
             columns=list(PosRecord.__annotations__.keys()) + \
                     list(GMMTestResults.__annotations__.keys())
         )
+        logger.info(f'Complete. Tested {len(res):,} positions')
         res.dropna(subset=['p_val'], inplace=True)
         if len(res):
             _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')

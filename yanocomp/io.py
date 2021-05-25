@@ -308,19 +308,19 @@ def load_gene_events(gene_id, datasets,
                 inplace=True
             )
             for transcript_id, group in e.groupby('transcript_idx'):
-                group = group[['mean', 'duration']].unstack(0)
+                group = group['mean'].unstack(0)
                 gene_events[transcript_id].append(group)
         else:
-            e = e[['mean', 'duration']].unstack(0)
+            e = e['mean'].unstack(0)
             gene_events.append(e)
 
     if by_transcript_ids:
         gene_events = {
-            t_id: pd.concat(e, sort=False)[['mean', 'duration']]
+            t_id: pd.concat(e, sort=False)
             for t_id, e in gene_events.items()
         }
     else:
-        gene_events = pd.concat(gene_events, sort=False)[['mean', 'duration']]
+        gene_events = pd.concat(gene_events, sort=False)
     
     return gene_events
 
@@ -353,7 +353,8 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05):
     with open(output_bed_fn, 'w') as bed:
         for record in res.itertuples(index=False):
             (chrom, pos, gene_id, strand, kmer,
-             log_odds, pval, fdr, c_fm, t_fm,
+             log_odds, log_odds_ci,
+             pval, fdr, c_fm, t_fm,
              g_stat, hom_g_stat,
              unmod_mu, unmod_std, mod_mu, mod_std,
              ks, shift_dir) = record

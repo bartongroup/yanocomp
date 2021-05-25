@@ -2,8 +2,9 @@ import dataclasses
 
 import numpy as np
 import pandas as pd
-from statsmodels.multivariate.pca import PCA
 from scipy import stats
+#from statsmodels.multivariate.pca import PCA
+from statsmodels.stats.contingency_tables import Table2x2
 import pomegranate as pm
 
 from .io import load_model_priors
@@ -12,15 +13,59 @@ from .io import load_model_priors
 N_COMPONENTS = 2
 
 
-def pca_kstest(cntrl_data, treat_data):
+def pca_comp1(X, standardise=True):
+    '''Quick principal components with 1 comp'''
+    if standardise:
+        mu = X.mean(axis=0)
+        sig = np.sqrt(((X - mu) ** 2.0).mean(0))
+        X = (X - mu) / sig
+    u, s, v = np.linalg.svd(X, full_matrices=False)
+    vecs = v.T
+    i1 = np.argmax(s ** 2.0)
+    vecs = vecs[:, i1, np.newaxis]
+    comp1 = X.dot(vecs)
+    return comp1.ravel()
+
+
+def _ks_d(data1, data2, pooled):
+    n1 = data1.shape[0]
+    n2 = data2.shape[0]
+    data1 = np.sort(data1)
+    data2 = np.sort(data2)
+    cdf1 = np.searchsorted(data1, pooled, side='right')/(1.0 * n1)
+    cdf2 = (np.searchsorted(data2, pooled, side='right'))/(1.0 * n2)
+    d = np.max(np.absolute(cdf1 - cdf2))
+    en = np.sqrt(n1 * n2 / float(n1 + n2))
+    return d, en
+
+
+def ks_2samp(data1, data2, pooled):
+    d, en = _ks_d(data1, data2, pooled)
+    prob = stats.kstwobign.sf((en + 0.12 + 0.11 / en) * d)
+    return d, prob
+
+
+def subsample(arr, max_size, random_state):
+    '''If arr is longer than max_size, subsamples without replacement'''
+    if len(arr) <= max_size:
+        return arr
+    else:
+        idx = np.arange(len(arr))
+        idx = random_state.choice(idx, size=max_size, replace=False)
+        return arr[idx]
+
+
+def pca_kstest(cntrl_data, treat_data, max_size, random_state):
     '''
     Transform multivariate data to univariate using PCA and perform
     Kolmogorov-Smirnov test
     '''
+    cntrl_data = subsample(cntrl_data, max_size, random_state)
+    treat_data = subsample(treat_data, max_size, random_state)
     n_cntrl = len(cntrl_data)
     pooled = np.concatenate([cntrl_data, treat_data])
-    comps = PCA(pooled, 1).factors.ravel()
-    ks, p_val = stats.ks_2samp(comps[:n_cntrl], comps[n_cntrl:])
+    comps = pca_comp1(pooled)
+    ks, p_val = ks_2samp(comps[:n_cntrl], comps[n_cntrl:], comps)
     return ks, p_val
 
 
@@ -150,16 +195,6 @@ def fit_multisamp_gmm(X, add_uniform=True, outlier_factor=0.5):
     return dists, combined_weights, per_samp_weights
 
 
-def subsample(arr, max_size, random_state):
-    '''If arr is longer than max_size, subsamples without replacement'''
-    if len(arr) <= max_size:
-        return arr
-    else:
-        idx = np.arange(len(arr))
-        idx = random_state.choice(idx, size=max_size, replace=False)
-        return arr[idx]
-
-
 def orient_dists(dists, weights, per_samp_weights, centre):
     '''
     Orients distributions of a GMM so that the mus are in ascending
@@ -255,25 +290,20 @@ def gmm_g_test(cntrl_preds, treat_preds, p_val_threshold=0.05):
     return het_g, hom_g, p_val
 
 
-def calculate_fractional_stats(cntrl_preds, treat_preds, pseudocount=0.5):
+def calculate_fractional_stats(cntrl_preds, treat_preds, pseudocount=0.5, ci=95):
     '''
     Returns the relative modification rates (ignoring outliers) for treat
     and cntrl samples. Also calculates log ratio of mod:unmod reads.
     '''
     cntrl_pred = cntrl_preds.sum(0)
     treat_pred = treat_preds.sum(0)
-    cntrl_frac_upper = (
-        (cntrl_pred[1] + pseudocount) / 
-        (cntrl_pred[:N_COMPONENTS].sum() + pseudocount)
-    )
-    treat_frac_upper = (
-        (treat_pred[1] + pseudocount) / 
-        (treat_pred[:N_COMPONENTS].sum() + pseudocount)
-    )
-    # symmetric log odds ratio
-    log_odds = (np.log2(treat_frac_upper) - (1 - np.log2(treat_frac_upper))) - \
-               (np.log2(cntrl_frac_upper) - (1 - np.log2(cntrl_frac_upper)))
-    return cntrl_frac_upper, treat_frac_upper, log_odds
+    cntrl_frac_upper = cntrl_pred[1] / cntrl_pred[:N_COMPONENTS].sum()
+    treat_frac_upper = treat_pred[1] / treat_pred[:N_COMPONENTS].sum()
+
+    ct = Table2x2([cntrl_pred[:N_COMPONENTS], treat_pred[:N_COMPONENTS]], shift_zeros=True)
+    log_odds = ct.log_oddsratio
+    log_odds_ci = ct.log_oddsratio_confint(alpha=1 - ci / 100)
+    return cntrl_frac_upper, treat_frac_upper, log_odds, log_odds_ci
 
 
 def format_sm_preds(sm_preds, sm_outlier, events):
@@ -327,6 +357,7 @@ class GMMTestResults:
     '''Class for handling results of positional_stats'''
     kmer: str = None
     log_odds: float = np.nan
+    log_odds_ci: tuple = (np.nan, np.nan)
     p_val: float = 1.
     fdr: float = 1.
     cntrl_frac_upper: float = np.nan
@@ -348,14 +379,14 @@ def position_stats(cntrl, treat, kmers,
     '''
     window_size = len(kmers)
     centre = window_size // 2
-    if not opts.model_dwell_time:
-        # remove dwell time info
-        cntrl = cntrl.iloc[:, :window_size]
-        treat = treat.iloc[:, :window_size]
     kmer = kmers[centre]
     r = GMMTestResults(kmer=kmer)
     # first test that there is actually some difference in cntrl/treat
-    r.ks_stat, ks_p_val = pca_kstest(cntrl.values, treat.values)
+    r.ks_stat, ks_p_val = pca_kstest(
+        cntrl.values, treat.values,
+        max_size=opts.max_fit_depth,
+        random_state=random_state,
+    )
 
     # if there is we can perform the GMM fit and subsequent G test
     if r.ks_stat >= opts.min_ks and ks_p_val < opts.fdr_threshold:
@@ -384,9 +415,10 @@ def position_stats(cntrl, treat, kmers,
             cntrl_preds, treat_preds,
             p_val_threshold=opts.fdr_threshold
         )
-        r.cntrl_frac_upper, r.treat_frac_upper, r.log_odds = calculate_fractional_stats(
+        frac_stats = calculate_fractional_stats(
             cntrl_preds, treat_preds
         )
+        r.cntrl_frac_upper, r.treat_frac_upper, r.log_odds, r.log_odds_ci = frac_stats
         if r.p_val < opts.fdr_threshold and opts.generate_sm_preds:
             cntrl_prob = gmm.predict_proba(np.concatenate(cntrl_fit_data))[:, 1:].T
             treat_prob = gmm.predict_proba(np.concatenate(treat_fit_data))[:, 1:].T
