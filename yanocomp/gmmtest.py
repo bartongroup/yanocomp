@@ -260,9 +260,15 @@ class GMMTestOpts:
             self.random_seed = len(self.output_bed_fn)
 
         self.generate_sm_preds = self.output_sm_preds_fn is not None
+        self.model = load_model_priors(self.model_fn)
 
 
-@click.command()
+@click.command(options_metavar='''-c <cntrl_hdf5_1> \\
+                                  -c <cntrl_hdf5_2> \\
+                                  -t <treat_hdf5_1> \\
+                                  -t <treat_hdf5_2> \\
+                                  [OPTIONS]''',
+              short_help='Differential RNA mod analysis')
 @click.option('-c', '--cntrl-hdf5-fns', required=True, multiple=True,
               help='Control HDF5 files. Can specify multiple files using multiple -c flags')
 @click.option('-t', '--treat-hdf5-fns', required=True, multiple=True,
@@ -270,7 +276,7 @@ class GMMTestOpts:
 @click.option('-o', '--output-bed-fn', required=True, help='Output bed file name')
 @click.option('-s', '--output-sm-preds-fn', required=False, default=None,
               help='JSON file to output single molecule predictions. Can be gzipped (detected from name)')
-@click.option('-m', '--prior-model-fn', required=False, default=None,
+@click.option('-m', '--model-fn', required=False, default=None,
               help='Model file with expected kmer current distributions')
 @click.option('--test-level', required=False, default='gene',
               type=click.Choice(['gene', 'transcript']), show_default=True,
@@ -288,15 +294,13 @@ class GMMTestOpts:
               help='Minimum reads per replicate to test a position. Default is to set dynamically')
 @click.option('-d', '--max-fit-depth', required=False, default=1000, show_default=True,
               help='Maximum number of reads per replicate used to fit the model')
-@click.option('-v', '--max-std', required=False, default=np.inf, hidden=True,
-              help='Filter positions where model fits have large variance')
-@click.option('-k', '--min-ks', required=False, default=0.1, show_default=True,
+@click.option('-k', '--min-ks', required=False, default=0.2, show_default=True,
               help='Minimum KS test statistic to attempt to build a model for a position')
 @click.option('-f', '--fdr-threshold', required=False, default=0.05, show_default=True,
               help='False discovery rate threshold for output')
 @click.option('-p', '--processes', required=False, show_default=True,
               default=1, type=click.IntRange(1, None))
-@click.option('--test-gene', required=False, default=None, hidden=True)
+@click.option('--test-gene', required=False, default=None, hidden=True, multiple=True)
 @click.option('--random-seed', required=False, default=None, hidden=True)
 @make_dataclass_decorator('GMMTestOpts', bases=(GMMTestOpts,))
 def gmm_test(opts):
@@ -311,11 +315,11 @@ def gmm_test(opts):
         res, sm_preds = parallel_test(opts)
     else:
         logger.info(
-            f'Testing single gene {opts.test_gene}'
+            f'Testing gene {" ".join(opts.test_gene)}'
         )
         res, sm_preds = test_chunk(
             dataclasses.asdict(opts),
-            ([opts.test_gene], opts.random_seed)
+            (opts.test_gene, opts.random_seed)
         )
         res = pd.DataFrame(
             res,
@@ -328,8 +332,7 @@ def gmm_test(opts):
             _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
 
     res, sm_preds = assign_modified_distribution(
-        *filter_results(res, sm_preds, opts.fdr_threshold),
-        load_model_priors(opts.prior_model_fn)
+        *filter_results(res, sm_preds, opts.fdr_threshold), opts.model
     )
 
     save_gmmtest_results(res, opts.output_bed_fn)

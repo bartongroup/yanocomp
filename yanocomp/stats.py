@@ -1,3 +1,4 @@
+from collections import defaultdict
 import dataclasses
 
 import numpy as np
@@ -89,7 +90,7 @@ def kmeans_init_clusters(X, detect_outliers=True, init_method='first-k',
         dists = np.min(centroid_dists, axis=1)
         mad = median_absolute_deviation(dists)
         outlier_mask = dists > outlier_factor * mad
-        init_pred[outlier_mask] = 2
+        init_pred[outlier_mask] = N_COMPONENTS
     return init_pred
 
 
@@ -195,35 +196,6 @@ def fit_multisamp_gmm(X, add_uniform=True, outlier_factor=0.5):
     return dists, combined_weights, per_samp_weights
 
 
-def orient_dists(dists, weights, per_samp_weights, centre):
-    '''
-    Orients distributions of a GMM so that the mus are in ascending
-    order for the central kmer.
-    '''
-    assert 1 < len(dists) < 4
-    has_uniform = len(dists) == 3
-    lower_mean = dists[0].mu[centre]
-    lower_std = np.sqrt(dists[0].cov[centre, centre])
-    upper_mean = dists[1].mu[centre]
-    upper_std = np.sqrt(dists[1].cov[centre, centre])
-    if lower_mean > upper_mean:
-        # flip model distributions and weights
-        if has_uniform:
-            dists = [dists[1], dists[0], dists[2]]
-            weights = weights[[1, 0, 2]]
-            per_samp_weights = per_samp_weights[:, [1, 0, 2]]
-        else:
-            dists = dists[::-1]
-            weights = weights[::-1]
-            per_samp_weights = per_samp_weights[:, ::-1]
-        lower_mean, upper_mean = upper_mean, lower_mean
-        lower_std, upper_std = upper_std, lower_std
-    oriented_params = (
-        lower_mean, lower_std, upper_mean, upper_std
-    )
-    return dists, weights, per_samp_weights, oriented_params
-
-
 def fit_gmm(cntrl, treat, centre, add_uniform=True,
             outlier_factor=0.5, max_fit_depth=1000,
             random_state=None):
@@ -240,15 +212,16 @@ def fit_gmm(cntrl, treat, centre, add_uniform=True,
         pooled, add_uniform=add_uniform, outlier_factor=outlier_factor
     )
 
-    dists, weights, per_samp_weights, params = orient_dists(
-        dists, weights, per_samp_weights, centre
+    model_params = (
+        dists[0].mu, dists[1].mu,
+        np.sqrt(np.diagonal(dists[0].cov)), np.sqrt(np.diagonal(dists[1].cov))
     )
     
     # use weights to estimate per-sample mod rates
     preds = np.round(per_samp_weights * samp_sizes[:, np.newaxis])
     cntrl_preds, treat_preds = preds[:n_cntrl], preds[n_cntrl:]
     gmm = pm.GeneralMixtureModel(dists, weights)
-    return gmm, cntrl_preds, treat_preds, *params
+    return gmm, cntrl_preds, treat_preds, model_params
 
 
 def two_cond_g_test(counts):
@@ -303,7 +276,7 @@ def calculate_fractional_stats(cntrl_preds, treat_preds, pseudocount=0.5, ci=95)
     ct = Table2x2([cntrl_pred[:N_COMPONENTS], treat_pred[:N_COMPONENTS]], shift_zeros=True)
     log_odds = ct.log_oddsratio
     log_odds_ci = ct.log_oddsratio_confint(alpha=1 - ci / 100)
-    return cntrl_frac_upper, treat_frac_upper, log_odds, log_odds_ci
+    return cntrl_frac_upper, treat_frac_upper, log_odds, *log_odds_ci
 
 
 def format_sm_preds(sm_preds, sm_outlier, events):
@@ -355,21 +328,23 @@ def format_model(gmm):
 @dataclasses.dataclass
 class GMMTestResults:
     '''Class for handling results of positional_stats'''
-    kmer: str = None
+    kmer: str
+    kmers: np.ndarray
+    centre: int
     log_odds: float = np.nan
-    log_odds_ci: tuple = (np.nan, np.nan)
+    log_odds_lower_ci: float = np.nan
+    log_odds_upper_ci: float = np.nan
     p_val: float = 1.
     fdr: float = 1.
-    cntrl_frac_upper: float = np.nan
-    treat_frac_upper: float = np.nan
+    cntrl_frac_mod: float = np.nan
+    treat_frac_mod: float = np.nan
     g_stat: float = np.nan
     hom_g_stat: float = np.nan
-    lower_mean: float = np.nan
-    lower_std: float = np.nan
-    upper_mean: float = np.nan
-    upper_std: float = np.nan
+    dist1_means: np.ndarray = None
+    dist1_stds: np.ndarray = None
+    dist2_means: np.ndarray = None
+    dist2_stds: np.ndarray = None
     ks_stat: float = np.nan
-    current_shift_dir: str = None
 
 
 def position_stats(cntrl, treat, kmers,
@@ -380,7 +355,7 @@ def position_stats(cntrl, treat, kmers,
     window_size = len(kmers)
     centre = window_size // 2
     kmer = kmers[centre]
-    r = GMMTestResults(kmer=kmer)
+    r = GMMTestResults(kmer=kmer, kmers=kmers, centre=centre)
     # first test that there is actually some difference in cntrl/treat
     r.ks_stat, ks_p_val = pca_kstest(
         cntrl.values, treat.values,
@@ -393,7 +368,7 @@ def position_stats(cntrl, treat, kmers,
         cntrl_fit_data = [c.values for _, c in cntrl.groupby('replicate', sort=False)]
         treat_fit_data = [t.values for _, t in treat.groupby('replicate', sort=False)]
         try:
-            gmm, cntrl_preds, treat_preds, *fit_params = fit_gmm(
+            gmm, cntrl_preds, treat_preds, model_params = fit_gmm(
                 cntrl_fit_data, treat_fit_data,
                 centre=centre,
                 add_uniform=opts.add_uniform,
@@ -403,22 +378,20 @@ def position_stats(cntrl, treat, kmers,
             )
         except np.linalg.LinAlgError:
             return False, r, None
-        std = max(
-            np.sqrt(np.diagonal(gmm.distributions[0].cov).max()),
-            np.sqrt(np.diagonal(gmm.distributions[1].cov).max()),
-        )
-        if std > opts.max_std:
-            return False, r, None
+
+        r.dist1_means, r.dist2_means, r.dist1_stds, r.dist2_stds = model_params
  
-        r.lower_mean, r.lower_std, r.upper_mean, r.upper_std = fit_params
         r.g_stat, r.hom_g_stat, r.p_val = gmm_g_test(
             cntrl_preds, treat_preds,
             p_val_threshold=opts.fdr_threshold
         )
-        frac_stats = calculate_fractional_stats(
-            cntrl_preds, treat_preds
-        )
-        r.cntrl_frac_upper, r.treat_frac_upper, r.log_odds, r.log_odds_ci = frac_stats
+
+        frac_stats = calculate_fractional_stats(cntrl_preds, treat_preds)
+        (
+            r.cntrl_frac_mod, r.treat_frac_mod,
+            r.log_odds, r.log_odds_lower_ci, r.log_odds_upper_ci
+        ) = frac_stats
+
         if r.p_val < opts.fdr_threshold and opts.generate_sm_preds:
             cntrl_prob = gmm.predict_proba(np.concatenate(cntrl_fit_data))[:, 1:].T
             treat_prob = gmm.predict_proba(np.concatenate(treat_fit_data))[:, 1:].T
@@ -441,9 +414,45 @@ def position_stats(cntrl, treat, kmers,
         return False, r, None
 
 
-def median_absolute_deviation_score(exp, obs):
-    '''Calculates the MAD score of an array compared to an expected value'''
-    return np.median(np.abs(obs - exp))
+def calculate_kmer_shift_directions(results, expected_model):
+    results = results[['kmers', 'dist1_means', 'dist2_means']]
+    kmer_lower_dists = defaultdict(list)
+    kmer_upper_dists = defaultdict(list)
+    for _, kmers, dist1_fit_means, dist2_fit_means in results.itertuples():
+        for k, lm, um in zip(kmers, dist1_fit_means, dist2_fit_means):
+            if lm > um:
+                lm, um = um, lm
+            exp = expected_model.loc['level_mean', k]
+            kmer_lower_dists[k].append(abs(lm - exp))
+            kmer_upper_dists[k].append(abs(um - exp))
+
+    kmer_shift_dirs = {}
+    for k in kmer_lower_dists:
+        if np.median(kmer_upper_dists[k]) > np.median(kmer_lower_dists[k]):
+            kmer_shift_dirs[k] = 1 # upper is more likely modified 
+        else:
+            kmer_shift_dirs[k] = 0 # lower is more likely modified
+    return kmer_shift_dirs
+
+
+def dist1_is_modified(kmers, dist1_means, dist2_means, kmer_shift_dirs):
+    '''
+    Predict whether dist1 or dist2 is modified using global shift
+    directions for each kmer in kmers and the separation between
+    dist1 and dist2
+    '''
+    diff = dist1_means - dist2_means
+    dist1_score = 0
+    dist2_score = 0
+    for k, d in zip(kmers, diff):
+        upper_is_mod = kmer_shift_dirs[k]
+        d2_is_upper = d < 0
+        if upper_is_mod ^ d2_is_upper:
+            dist1_score += abs(d)
+        else:
+            dist2_score += abs(d)
+    # larger score is modified
+    return dist1_score > dist2_score
 
 
 def assign_modified_distribution(results, sm_preds,
@@ -451,46 +460,41 @@ def assign_modified_distribution(results, sm_preds,
                                  sample_size=1000):
     '''
     Given all significant kmer results, predict for each kmer which distribution
-    (i.e. upper or lower) is most likely to be modified using an existing model
-    of nanopore current.    
+    is most likely to be modified using an existing model of nanopore current.    
     '''
     # corner case with no sig results
     if not len(results):
         return results, sm_preds
+    kmer_shift_dirs = calculate_kmer_shift_directions(results, model)
     res_assigned = []
-    for kmer, kmer_res in results.groupby('kmer'):
-        exp_mean = model.loc['level_mean', kmer]
-        lower_fit_dist = median_absolute_deviation_score(kmer_res.lower_mean.values, exp_mean)
-        upper_fit_dist = median_absolute_deviation_score(kmer_res.upper_mean.values, exp_mean)
-        if lower_fit_dist <= upper_fit_dist:
-            # lower is unmod
-            kmer_res['current_shift_dir'] = 'h'
-        else:
+    for i in results.index:
+        kmers, dist1_means, dist2_means = results.loc[i, ['kmers', 'dist1_means', 'dist2_means']]
+        if dist1_is_modified(kmers, dist1_means, dist2_means, kmer_shift_dirs):
             # higher is unmod, flip the values
-            kmer_res.loc[:, 'current_shift_dir'] = 'l'
-            kmer_res.loc[:, 'cntrl_frac_upper'] = 1 - kmer_res.loc[:, 'cntrl_frac_upper']
-            kmer_res.loc[:, 'treat_frac_upper'] = 1 - kmer_res.loc[:, 'treat_frac_upper']
-            kmer_res.loc[:, 'log_odds'] = np.negative(kmer_res.loc[:, 'log_odds'])
-            kmer_res.loc[:, ['lower_mean','upper_mean']] = (
-                kmer_res.loc[:, ['upper_mean','lower_mean']].values
+            results.loc[i, 'cntrl_frac_mod'] = 1 - results.loc[i, 'cntrl_frac_mod']
+            results.loc[i, 'treat_frac_mod'] = 1 - results.loc[i, 'treat_frac_mod']
+            results.loc[i, 'log_odds'] = np.negative(results.loc[i, 'log_odds'])
+            results.loc[i, ['log_odds_lower_ci', 'log_odds_upper_ci']] = np.negative(
+                results.loc[i, ['log_odds_upper_ci', 'log_odds_lower_ci']]
             )
-            kmer_res.loc[:, ['lower_std','upper_std']] = (
-                kmer_res.loc[:, ['upper_std','lower_std']].values
+            results.loc[i, ['dist1_means','dist2_means']] = (
+                results.loc[i, ['dist2_means','dist1_means']].values
+            )
+            results.loc[i, ['dist1_stds','dist2_stds']] = (
+                results.loc[i, ['dist2_stds','dist1_stds']].values
             )
             # also need to reverse the sm_preds:
-            for _, gene_id, pos in kmer_res[['gene_id', 'pos']].itertuples():
-                try:
-                    pos_sm_preds = sm_preds[gene_id][pos]
-                except KeyError:
-                    continue
-                m = pos_sm_preds['model']
-                m['unmod'], m['mod'] = m['mod'], m['unmod']
-                for cond in ['cntrl', 'treat']:
-                    for rep_sm_preds in pos_sm_preds[cond].values():
-                        rep_sm_preds['preds'] = [
-                            1 - (p + o) for p, o in zip(rep_sm_preds['preds'],
-                                                        rep_sm_preds['outlier_preds'])
-                        ]
-        res_assigned.append(kmer_res)
-    results = pd.concat(res_assigned)
+            gene_id, pos = results.loc[i, ['gene_id', 'pos']]
+            try:
+                pos_sm_preds = sm_preds[gene_id][pos]
+            except KeyError:
+                continue
+            m = pos_sm_preds['model']
+            m['unmod'], m['mod'] = m['mod'], m['unmod']
+            for cond in ['cntrl', 'treat']:
+                for rep_sm_preds in pos_sm_preds[cond].values():
+                    rep_sm_preds['preds'] = [
+                        1 - (p + o) for p, o in zip(rep_sm_preds['preds'],
+                                                    rep_sm_preds['outlier_preds'])
+                    ]
     return results, sm_preds
