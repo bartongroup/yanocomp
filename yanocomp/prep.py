@@ -157,7 +157,7 @@ def parallel_collapse(ea_fn, gtf_fn, processes, chunksize):
                 yield gene_id, chrom, strand, records
 
 
-@click.command()
+@click.command(short_help='Convert nanopolish eventalign tsv to HDF5')
 @click.option('-e', '--eventalign-fn', required=False, default='-', show_default=True,
               help=('File containing output of nanopolish eventalign. '
                     'Can be gzipped. Use - to read from stdin'))

@@ -311,7 +311,7 @@ def gmm_test(opts):
         f'Running gmmtest with {len(opts.cntrl_hdf5_fns):,} control '
         f'datasets and {len(opts.treat_hdf5_fns):,} treatment datasets'
     )
-    if opts.test_gene is None:
+    if not len(opts.test_gene):
         res, sm_preds = parallel_test(opts)
     else:
         logger.info(

@@ -5,7 +5,7 @@
 
 * It parses nanopolish eventalign output on the fly into a (relatively) compact HDF5 file allowing random access.
 * A GTF file can be provided to convert transcriptomic coordinates from eventalign back to genomic coordinates.
-* It uses [`pomegranate`](https://github.com/jmschrei/pomegranate) for model fitting (which makes it fast!).
+* It uses the fast [`pomegranate`](https://github.com/jmschrei/pomegranate) library for model fitting.
 * It fits models using multiple adjacent kmers to better separate modified and unmodified distributions.
 * A uniform distribution is used to model outliers caused by low quality signal or poor alignment. This improves the fit and reduces false positives.
 * The trained models can be used to make single molecule modification predictions for each read at each significant position.
@@ -47,7 +47,7 @@ nanopolish eventalign \
 
 ### `prep`:
 
-`yanocomp prep` will parse a text or gzipped file containing the tabular results from `nanopolish eventalign` and summarise them into a more compact HDF5 file. Output from eventalign can also be piped to `yanocomp` prep on the fly. Basecalled reads should be aligned to a  before event alignment, but `yanocomp prep` can convert back to genomic coordinates if a GTF file is provided.
+`yanocomp prep` will parse a text or gzipped file containing the tabular results from `nanopolish eventalign` and summarise them into a more compact HDF5 file. Output from eventalign can also be piped to `yanocomp` prep on the fly. Basecalled reads should be aligned to a transcriptome reference before event alignment, but `yanocomp prep` can convert back to genomic coordinates if a GTF file is provided.
 
 #### Options:
 ```
@@ -97,7 +97,7 @@ Options:
                                   predictions. Can be gzipped (detected from
                                   name)
 
-  -m, --prior-model-fn TEXT       Model file with expected kmer current
+  -m, --model-fn TEXT             Model file with expected kmer current
                                   distributions
 
   --test-level [gene|transcript]  Test at transcript level or aggregate to
@@ -137,7 +137,7 @@ A 19-column BED file format with the following values:
 4. gene_id:kmer [string]
 5. score (min(- log10(FDR), 100)) [integer]
 6. strand [string, either '+' or '-']
-7. modification log ratio [float]
+7. modification log ratio (plus 95% conf intervals) [str]
 8. G-test p-value [float]
 9. G-test FDR [float]
 10. Control sample estimated fraction modified [float]
@@ -148,8 +148,7 @@ A 19-column BED file format with the following values:
 15. Unmodified distribution standard deviation [float]
 16. Modified distribution mean [float]
 17. Modified distribution standard deviation [float]
-18. Modified distribution shift direction [string, 'l' for lower or 'h' for higher]
-19. KS statistic [float]
+18. KS statistic [float]
 ```
 
 `gmmtest` can also optionally output a json file containing the single molecule modification predictions. The schema may change but is currently:
