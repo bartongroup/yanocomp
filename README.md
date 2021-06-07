@@ -61,13 +61,25 @@ Options:
   -e, --eventalign-fn TEXT  File containing output of nanopolish eventalign.
                             Can be gzipped. Use - to read from stdin
                             [default: -]
-
   -h, --hdf5-fn TEXT        Output HDF5 file  [required]
   -g, --gtf-fn TEXT         Optional GTF file which can be used to convert
                             transcriptomic coordinates to genomic
-
   -p, --processes INTEGER   [default: 1]
   --help                    Show this message and exit.
+```
+
+
+#### Example usage:
+
+```
+$ nanopolish eventalign -t 28 \
+  --scale-events --signal-index --print-read-names \
+  -r reads.fastq \
+  -b aligned.bam \
+  -g transcriptome.fasta |
+diffmod prep -p 4 \
+  -g annotation.gtf \
+  -h output.hdf5
 ```
 
 #### Output:
@@ -81,50 +93,52 @@ A HDF5 file storing summarised event level signal data. The file contains one gr
 #### Options:
 ```
 $ yanocomp gmmtest --help
-Usage: yanocomp gmmtest [OPTIONS]
+Usage: yanocomp gmmtest -c <cntrl_hdf5_1> \
+                        -c <cntrl_hdf5_2> \
+                        -t <treat_hdf5_1> \
+                        -t <treat_hdf5_2> \
+                        [OPTIONS]
 
   Differential RNA modifications using nanopore DRS signal level data
 
 Options:
   -c, --cntrl-hdf5-fns TEXT       Control HDF5 files. Can specify multiple
                                   files using multiple -c flags  [required]
-
   -t, --treat-hdf5-fns TEXT       Treatment HDF5 files. Can specify multiple
                                   files using multiple -t flags  [required]
-
   -o, --output-bed-fn TEXT        Output bed file name  [required]
   -s, --output-sm-preds-fn TEXT   JSON file to output single molecule
                                   predictions. Can be gzipped (detected from
                                   name)
-
   -m, --model-fn TEXT             Model file with expected kmer current
                                   distributions
-
   --test-level [gene|transcript]  Test at transcript level or aggregate to
                                   gene level  [default: gene]
-
   -w, --window-size INTEGER       How many adjacent kmers to model over
                                   [default: 5]
-
   -e, --outlier-factor FLOAT      Scaling factor for labelling outliers during
                                   model initialisation. Smaller means more
                                   aggressive labelling of outliers  [default:
                                   0.5]
-
-  -n, --min-read-depth TEXT       Minimum reads per replicate to test a
+  -n, --min-read-depth INTEGER    Minimum reads per replicate to test a
                                   position. Default is to set dynamically
-
   -d, --max-fit-depth INTEGER     Maximum number of reads per replicate used
                                   to fit the model  [default: 1000]
-
   -k, --min-ks FLOAT              Minimum KS test statistic to attempt to
-                                  build a model for a position  [default: 0.1]
-
+                                  build a model for a position  [default: 0.2]
   -f, --fdr-threshold FLOAT       False discovery rate threshold for output
                                   [default: 0.05]
-
-  -p, --processes INTEGER RANGE   [default: 1]
+  -p, --processes INTEGER RANGE   [default: 1;x>=1]
   --help                          Show this message and exit.
+```
+
+#### Example usage:
+
+```
+$ yanocomp gmmtest -p 12 \
+  -c cntrl_1.hdf5 -c cntrl_2.hdf5 -c cntrl_3.hdf5 \
+  -t treat_1.hdf5 -t treat_1.hdf5 -t treat_3.hdf5 \
+  -o output.bed -s output_sm_preds.json.gz
 ```
 
 #### Output:
@@ -144,9 +158,9 @@ A 19-column BED file format with the following values:
 11. Treatment sample estimated fraction modified [float]
 12. G-statistic (Treat vs cntrl) [float]
 13. Homogeneity G-statistic [float]
-14. Unmodified distribution mean [float]
+14. Unmodified distribution mean for central kmer [float]
 15. Unmodified distribution standard deviation [float]
-16. Modified distribution mean [float]
+16. Modified distribution mean for central kmer [float]
 17. Modified distribution standard deviation [float]
 18. KS statistic [float]
 ```
