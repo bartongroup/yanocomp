@@ -1,6 +1,8 @@
 # yanocomp
 ### (yet another nanopore modification comparison tool)
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4955870.svg)](https://doi.org/10.5281/zenodo.4955870)
+
 `yanocomp` does detection of RNA modifications from nanopore direct RNA sequencing (DRS) data which has been "eventaligned" using [`nanopolish`](https://github.com/jts/nanopolish). It uses a comparative approach with General mixture models similar to those used by [`nanocompore`](https://github.com/tleonardi/nanocompore) and [`xpore`](https://github.com/GoekeLab/xpore). The main selling points of `yanocomp` are:
 
 * It parses nanopolish eventalign output on the fly into a (relatively) compact HDF5 file allowing random access.
@@ -23,7 +25,7 @@ conda env create -f yanocomp.yml
 conda activate yanocomp
 ```
 
-Alternatively `yanosim` and the required packages can be installed using pip:
+Alternatively `yanocomp` and the required packages can be installed using pip:
 
 ```
 pip install git+git://github.com/bartongroup/yanocomp.git
