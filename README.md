@@ -214,3 +214,12 @@ A 19-column BED file format with the following values:
 }
 ```
 
+## Citing `yanocomp`:
+
+A preprint describing `yanocomp` is available on [bioRxiv](https://www.biorxiv.org/content/10.1101/2021.06.15.448494v1)
+
+```
+Parker,M.T. et al. (2021) 
+Yanocomp: robust prediction of m6A modifications in individual nanopore direct RNA reads.
+bioRxiv, 2021.06.15.448494.
+```
