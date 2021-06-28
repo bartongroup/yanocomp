@@ -344,7 +344,7 @@ def load_model_priors(model_fn=None):
     return m.transpose()
 
 
-def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05):
+def save_gmmtest_results(res, output_bed_fn):
     '''
     write main results to bed file
     '''
@@ -359,8 +359,12 @@ def save_gmmtest_results(res, output_bed_fn, fdr_threshold=0.05):
              g_stat, hom_g_stat,
              unmod_mus, unmod_stds, mod_mus, mod_stds,
              ks) = record
-            unmod_mu, unmod_std = unmod_mus[centre], unmod_stds[centre]
-            mod_mu, mod_std = mod_mus[centre], mod_stds[centre]
+            try:
+                unmod_mu, unmod_std = unmod_mus[centre], unmod_stds[centre]
+                mod_mu, mod_std = mod_mus[centre], mod_stds[centre]
+            except TypeError:
+                # no gmm testing
+                unmod_mu, unmod_std, mod_mu, mod_std = np.nan, np.nan, np.nan, np.nan
             with np.errstate(divide='ignore'):
                 score = int(round(min(- np.log10(fdr), 100)))
             bed_record = (

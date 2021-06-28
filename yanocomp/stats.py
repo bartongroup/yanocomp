@@ -270,8 +270,9 @@ def calculate_fractional_stats(cntrl_preds, treat_preds, pseudocount=0.5, ci=95)
     '''
     cntrl_pred = cntrl_preds.sum(0)
     treat_pred = treat_preds.sum(0)
-    cntrl_frac_upper = cntrl_pred[1] / cntrl_pred[:N_COMPONENTS].sum()
-    treat_frac_upper = treat_pred[1] / treat_pred[:N_COMPONENTS].sum()
+    with np.errstate(invalid='ignore'):
+        cntrl_frac_upper = cntrl_pred[1] / cntrl_pred[:N_COMPONENTS].sum()
+        treat_frac_upper = treat_pred[1] / treat_pred[:N_COMPONENTS].sum()
 
     ct = Table2x2([cntrl_pred[:N_COMPONENTS], treat_pred[:N_COMPONENTS]], shift_zeros=True)
     log_odds = ct.log_oddsratio
@@ -362,6 +363,9 @@ def position_stats(cntrl, treat, kmers,
         max_size=opts.max_fit_depth,
         random_state=random_state,
     )
+    if not opts.gmm: # no modelling
+        r.p_val = ks_p_val
+        return True, r, None
 
     # if there is we can perform the GMM fit and subsequent G test
     if r.ks_stat >= opts.min_ks and ks_p_val < opts.fdr_threshold:

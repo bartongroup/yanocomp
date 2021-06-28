@@ -301,6 +301,7 @@ class GMMTestOpts:
 @click.option('-p', '--processes', required=False, show_default=True,
               default=1, type=click.IntRange(1, None))
 @click.option('--test-gene', required=False, default=None, hidden=True, multiple=True)
+@click.option('--gmm/--no-gmm', required=False, default=True, hidden=True)
 @click.option('--random-seed', required=False, default=None, hidden=True)
 @make_dataclass_decorator('GMMTestOpts', bases=(GMMTestOpts,))
 def gmm_test(opts):
@@ -331,12 +332,12 @@ def gmm_test(opts):
         if len(res):
             _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
 
-    res, sm_preds = assign_modified_distribution(
-        *filter_results(res, sm_preds, opts.fdr_threshold), opts.model
-    )
+    res, sm_preds = filter_results(res, sm_preds, opts.fdr_threshold)
+    if opts.gmm:
+        res, sm_preds = assign_modified_distribution(res, sm_preds, opts.model)
 
     save_gmmtest_results(res, opts.output_bed_fn)
-    if opts.generate_sm_preds:
+    if opts.gmm and opts.generate_sm_preds:
         save_sm_preds(
             sm_preds,
             opts.cntrl_hdf5_fns, opts.treat_hdf5_fns,
