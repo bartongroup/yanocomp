@@ -131,7 +131,8 @@ def get_chunks(ea, approx_chunksize, gtf=None):
         yield ea_chunk, gtf_chunk
 
 
-def parallel_collapse(ea_fn, gtf_fn, processes, chunksize):
+def parallel_collapse(ea_fn, summary_fn=None, gtf_fn=None,
+                      processes=1, chunksize=1_000_000):
     '''
     collapses the records from the eventalign file
     '''
@@ -147,7 +148,7 @@ def parallel_collapse(ea_fn, gtf_fn, processes, chunksize):
         gtf = None
         to_gene = False
 
-    ea_chunker = get_chunks(parse_eventalign(ea_fn), chunksize, gtf)
+    ea_chunker = get_chunks(parse_eventalign(ea_fn, summary_fn), chunksize, gtf)
     with mp.Pool(processes) as pool:
         _collapse_func = partial(collapse_chunk, to_gene=to_gene)
         for chunk, gene_info in pool.imap_unordered(_collapse_func, ea_chunker):
@@ -161,6 +162,10 @@ def parallel_collapse(ea_fn, gtf_fn, processes, chunksize):
 @click.option('-e', '--eventalign-fn', required=False, default='-', show_default=True,
               help=('File containing output of nanopolish eventalign. '
                     'Can be gzipped. Use - to read from stdin'))
+@click.option('-s', '--summary-fn', required=False, default=None, show_default=True,
+              help=('Summary file containing nanopolish eventalign read names. '
+                    'Can be gzipped. Only required if nanopolish was not run '
+                    'using --print-read-names options'))
 @click.option('-h', '--hdf5-fn', required=True,
               help='Output HDF5 file')
 @click.option('-g', '--gtf-fn', required=False, default=None,
@@ -177,6 +182,7 @@ def nanopolish_collapse(opts):
     save_events_to_hdf5(
         parallel_collapse(
             opts.eventalign_fn,
+            opts.summary_fn,
             opts.gtf_fn,
             opts.processes,
             opts.chunksize

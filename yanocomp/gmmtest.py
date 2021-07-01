@@ -298,18 +298,26 @@ class GMMTestOpts:
               help='Minimum KS test statistic to attempt to build a model for a position')
 @click.option('-f', '--fdr-threshold', required=False, default=0.05, show_default=True,
               help='False discovery rate threshold for output')
+@click.option('--gmm/--no-gmm', required=False, default=True,
+              help='Do not attempt to model with GMM. P values/FDRs are for KS test only')
 @click.option('-p', '--processes', required=False, show_default=True,
               default=1, type=click.IntRange(1, None))
 @click.option('--test-gene', required=False, default=None, hidden=True, multiple=True)
-@click.option('--gmm/--no-gmm', required=False, default=True, hidden=True)
 @click.option('--random-seed', required=False, default=None, hidden=True)
 @make_dataclass_decorator('GMMTestOpts', bases=(GMMTestOpts,))
 def gmm_test(opts):
     '''
     Differential RNA modifications using nanopore DRS signal level data
     '''
+    if not opts.gmm:
+        mode = 'KS-only'
+    elif not opts.add_uniform:
+        mode = '2-comp GMM'
+    else:
+        mode = '3-comp GMM (uniform outliers)'
     logger.info(
-        f'Running gmmtest with {len(opts.cntrl_hdf5_fns):,} control '
+        f'Running gmmtest in {mode} mode '
+        f'with {len(opts.cntrl_hdf5_fns):,} control '
         f'datasets and {len(opts.treat_hdf5_fns):,} treatment datasets'
     )
     if not len(opts.test_gene):

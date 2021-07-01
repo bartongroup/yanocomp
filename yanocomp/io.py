@@ -39,14 +39,29 @@ def path_or_stdin_reader(fn):
         handle.close()
         gen.close()
 
+        
+def parse_eventalign_summary(summary_fn):
+    read_name_idx = {}
+    with path_or_stdin_reader(summary_fn) as handle:
+        sm_parser = csv.DictReader(handle, delimiter='\t')
+        fieldnames = set(sm_parser.fieldnames)
+        for record in sm_parser:
+            read_name_idx[record['read_index']] = record['read_name']
+    return read_name_idx
 
-def parse_eventalign(eventalign_fn):
+
+def parse_eventalign(eventalign_fn, summary_fn=None):
+    if summary_fn is not None:
+        read_name_idx = parse_eventalign_summary(summary_fn)
+    else:
+        read_name_idx = None
     with path_or_stdin_reader(eventalign_fn) as handle:
         ea_parser = csv.DictReader(handle, delimiter='\t')
         fieldnames = set(ea_parser.fieldnames)
-        if 'read_name' not in fieldnames:
+        if 'read_name' not in fieldnames and read_name_idx is None:
             raise KeyError(
-                'nanopolish must be run with --print-read-names option'
+                'nanopolish must be either run with --print-read-names option '
+                'or else a eventalign summary file must be provided'
             )
         if not fieldnames.issuperset(['start_idx', 'end_idx']):
             raise KeyError(
@@ -58,7 +73,10 @@ def parse_eventalign(eventalign_fn):
             parsed['t_id'] = record['contig']
             parsed['pos'] = int(record['position']) + 2
             parsed['kmer'] = record['reference_kmer']
-            parsed['r_id'] = record['read_name']
+            try:
+                parsed['r_id'] = record['read_name']
+            except KeyError:
+                parsed['r_id'] = read_name_idx[record['read_index']]
             parsed['mean'] = float(record['event_level_mean'])
             parsed['std'] = float(record['event_stdv'])
             parsed['duration'] = float(record['event_length'])
