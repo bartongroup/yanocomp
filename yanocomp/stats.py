@@ -4,7 +4,6 @@ import dataclasses
 import numpy as np
 import pandas as pd
 from scipy import stats
-#from statsmodels.multivariate.pca import PCA
 from statsmodels.stats.contingency_tables import Table2x2
 import pomegranate as pm
 
@@ -94,7 +93,8 @@ def kmeans_init_clusters(X, detect_outliers=True, init_method='first-k',
     return init_pred
 
 
-def initialise_gmms(X, add_uniform=True, init_method='first-k',
+def initialise_gmms(X, covariance='full', add_uniform=True,
+                    init_method='first-k',
                     batch_size=100, max_iter=4, pseudocount=0.5,
                     outlier_factor=0.5):
     '''
@@ -103,6 +103,7 @@ def initialise_gmms(X, add_uniform=True, init_method='first-k',
     '''
     samp_sizes = [len(samp) for samp in X]
     X_pooled = np.concatenate(X)
+    n_dim = X_pooled.shape[1]
 
     init_pred = kmeans_init_clusters(
         X_pooled, detect_outliers=add_uniform,
@@ -110,10 +111,27 @@ def initialise_gmms(X, add_uniform=True, init_method='first-k',
         batch_size=batch_size, max_iter=max_iter,
         outlier_factor=outlier_factor
     )
-    dists = [
-        pm.MultivariateGaussianDistribution.from_samples(X_pooled[init_pred == i])
-        for i in range(N_COMPONENTS)
-    ]
+    if covariance == 'full':
+        dists = [
+            pm.MultivariateGaussianDistribution.from_samples(X_pooled[init_pred == i])
+            for i in range(N_COMPONENTS)
+        ]
+    elif covariance == 'diag':
+        dists = []
+        for i in range(N_COMPONENTS):
+            X_i = X_pooled[init_pred == i]
+            if len(X_i) == 0:
+                dists.append(pm.IndependentComponentsDistribution([
+                    pm.NormalDistribution(0, 1)
+                    for j in range(n_dim)
+                ]))
+            else:
+                dists.append(pm.IndependentComponentsDistribution([
+                    pm.NormalDistribution(X_i[:, j].mean(), X_i[:, j].std())
+                    for j in range(n_dim)
+                ]))
+    else:
+        raise ValueError('Only full and diag covariances are supported')
 
     ncomp = N_COMPONENTS + int(add_uniform)
     per_samp_preds = np.array_split(init_pred, np.cumsum(samp_sizes)[:-1])
@@ -171,7 +189,7 @@ def em(X, gmms, dists, max_iterations=1e8, stop_threshold=0.1,
     return gmms, dists
 
 
-def fit_multisamp_gmm(X, add_uniform=True, outlier_factor=0.5):
+def fit_multisamp_gmm(X, covariance='full', add_uniform=True, outlier_factor=0.5):
     '''
     Fit a gaussian mixture model to multiple samples. Each sample has its own
     GMM with its own weights but shares distributions with others. Returns
@@ -179,7 +197,7 @@ def fit_multisamp_gmm(X, add_uniform=True, outlier_factor=0.5):
     '''
     try:
         with np.errstate(divide='ignore'):
-            gmms, dists = initialise_gmms(X, add_uniform, outlier_factor=outlier_factor)
+            gmms, dists = initialise_gmms(X, covariance, add_uniform, outlier_factor=outlier_factor)
 
         with np.errstate(invalid='ignore', over='ignore'):
             gmms, dists = em(X, gmms, dists)
@@ -196,7 +214,7 @@ def fit_multisamp_gmm(X, add_uniform=True, outlier_factor=0.5):
     return dists, combined_weights, per_samp_weights
 
 
-def fit_gmm(cntrl, treat, centre, add_uniform=True,
+def fit_gmm(cntrl, treat, covariance='full', add_uniform=True,
             outlier_factor=0.5, max_fit_depth=1000,
             random_state=None):
     '''
@@ -209,13 +227,28 @@ def fit_gmm(cntrl, treat, centre, add_uniform=True,
         subsample(samp, max_fit_depth, random_state) for samp in cntrl + treat
     ]
     dists, weights, per_samp_weights = fit_multisamp_gmm(
-        pooled, add_uniform=add_uniform, outlier_factor=outlier_factor
+        pooled, covariance=covariance,
+        add_uniform=add_uniform, outlier_factor=outlier_factor
     )
 
-    model_params = (
-        dists[0].mu, dists[1].mu,
-        np.sqrt(np.diagonal(dists[0].cov)), np.sqrt(np.diagonal(dists[1].cov))
-    )
+    if covariance == 'full':
+        model_params = (
+            dists[0].mu, dists[1].mu,
+            np.sqrt(np.diagonal(dists[0].cov)), np.sqrt(np.diagonal(dists[1].cov))
+        )
+    elif covariance == 'diag':
+        mu_1, std_1 = zip(
+            *[d.parameters for d in dists[0]]
+        )
+        mu_2, std_2 = zip(
+            *[d.parameters for d in dists[1]]
+        )
+        model_params = [
+            np.array(mu_1), np.array(mu_2),
+            np.array(std_1), np.array(std_2)
+        ]
+    else:
+        raise ValueError('Only full and diag covariances are supported')
     
     # use weights to estimate per-sample mod rates
     preds = np.round(per_samp_weights * samp_sizes[:, np.newaxis])
@@ -306,16 +339,35 @@ def format_sm_preds(sm_preds, sm_outlier, events):
 
 def format_model(gmm):
     '''Create a json serialisable dict of GMM parameters'''
-    model_json = {
-        'unmod': {
-            'mu': gmm.distributions[0].mu.tolist(),
-            'cov': gmm.distributions[0].cov.tolist(),
-        },
-        'mod': {
-            'mu': gmm.distributions[1].mu.tolist(),
-            'cov': gmm.distributions[1].cov.tolist(),
-        },
-    }
+    try:
+        model_json = {
+            'unmod': {
+                'mu': gmm.distributions[0].mu.tolist(),
+                'cov': gmm.distributions[0].cov.tolist(),
+            },
+            'mod': {
+                'mu': gmm.distributions[1].mu.tolist(),
+                'cov': gmm.distributions[1].cov.tolist(),
+            },
+        }
+    except AttributeError:
+        # model is IndependentComponentsDistribution (diagonal covariance)
+        mu_1, std_1 = zip(
+            *[d.parameters for d in gmm.distributions[0]]
+        )
+        cov_1 = np.diag(std_1 ** 2)
+        mu_2, std_2 = zip(
+            *[d.parameters for d in gmm.distributions[1]]
+        )
+        cov_2 = np.diag(std_2 ** 2)
+        model_json = {
+            'unmod': {
+                'mu': mu_1, 'cov': cov_1,
+            },
+            'mod': {
+                'mu': mu_2, 'cov': cov_2,
+            },
+        }
     if len(gmm.distributions) == (N_COMPONENTS + 1):
         outlier = gmm.distributions[2]
         model_json['outlier'] = {
