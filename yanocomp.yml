@@ -11,6 +11,7 @@ dependencies:
   - statsmodels
   - pomegranate>=0.13.3
   - joblib=0.17.0 # pomegranate incompatible with joblib 1.0
+  - scikit-learn
   - h5py=2.10.0
   - click
   - pip:

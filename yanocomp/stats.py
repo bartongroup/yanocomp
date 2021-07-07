@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from statsmodels.stats.contingency_tables import Table2x2
+from sklearn.cluster import DBSCAN
 import pomegranate as pm
 
 from .io import load_model_priors
@@ -74,8 +75,9 @@ def median_absolute_deviation(arr):
     return np.median(np.abs(arr - np.median(arr)))
 
 
-def kmeans_init_clusters(X, detect_outliers=True, init_method='first-k',
-                         batch_size=100, max_iter=4, outlier_factor=0.5):
+def kmeans_init_clusters(X, detect_outliers='mad', init_method='first-k',
+                         batch_size=100, max_iter=4, outlier_factor=0.5,
+                         dbscan_eps=5, dbscan_min_samples=5):
     '''
     Get predictions for initialising GMM using KMeans. Outliers are detected
     by calculating the MAD of the distances to the nearest centroid, and then
@@ -85,18 +87,30 @@ def kmeans_init_clusters(X, detect_outliers=True, init_method='first-k',
     kmeans.fit(X, batch_size=batch_size, max_iterations=max_iter)
     centroid_dists = kmeans.distance(X)
     init_pred = np.argmin(centroid_dists, axis=1)
-    if detect_outliers:
-        dists = np.min(centroid_dists, axis=1)
-        mad = median_absolute_deviation(dists)
-        outlier_mask = dists > outlier_factor * mad
+    if detect_outliers is not None:
+        if detect_outliers == 'mad':
+            dists = np.min(centroid_dists, axis=1)
+            mad = median_absolute_deviation(dists)
+            outlier_mask = dists > outlier_factor * mad
+        elif detect_outliers == 'dbscan':
+            dbscan = DBSCAN(
+                eps=dbscan_eps,
+                min_samples=dbscan_min_samples,
+                metric='manhattan'
+            )
+            outlier_mask = dbscan.fit_predict(X) == -1
+        else:
+            raise ValueError('only mad and dbscan outlier methods are supported')
         init_pred[outlier_mask] = N_COMPONENTS
+        
     return init_pred
 
 
-def initialise_gmms(X, covariance='full', add_uniform=True,
+def initialise_gmms(X, covariance='full', detect_outliers=True,
                     init_method='first-k',
                     batch_size=100, max_iter=4, pseudocount=0.5,
-                    outlier_factor=0.5):
+                    outlier_factor=0.5,
+                    dbscan_eps=5, dbscan_min_samples=5):
     '''
     Uses K-means to initialise 2-component GMM.
     Optionally adds a uniform dist to account for poorly aligned reads
@@ -106,10 +120,11 @@ def initialise_gmms(X, covariance='full', add_uniform=True,
     n_dim = X_pooled.shape[1]
 
     init_pred = kmeans_init_clusters(
-        X_pooled, detect_outliers=add_uniform,
+        X_pooled, detect_outliers=detect_outliers,
         init_method=init_method,
         batch_size=batch_size, max_iter=max_iter,
-        outlier_factor=outlier_factor
+        outlier_factor=outlier_factor,
+        dbscan_eps=dbscan_eps, dbscan_min_samples=dbscan_eps,
     )
     if covariance == 'full':
         dists = [
@@ -133,7 +148,7 @@ def initialise_gmms(X, covariance='full', add_uniform=True,
     else:
         raise ValueError('Only full and diag covariances are supported')
 
-    ncomp = N_COMPONENTS + int(add_uniform)
+    ncomp = N_COMPONENTS + int(detect_outliers is not None)
     per_samp_preds = np.array_split(init_pred, np.cumsum(samp_sizes)[:-1])
 
     weights = [
@@ -141,7 +156,7 @@ def initialise_gmms(X, covariance='full', add_uniform=True,
             len(pred) + pseudocount * ncomp)
         for pred in per_samp_preds
     ]
-    if add_uniform:
+    if detect_outliers is not None:
         outliers = X_pooled[init_pred == N_COMPONENTS]
         if len(outliers) == 0:
             # set params using all data
@@ -189,7 +204,8 @@ def em(X, gmms, dists, max_iterations=1e8, stop_threshold=0.1,
     return gmms, dists
 
 
-def fit_multisamp_gmm(X, covariance='full', add_uniform=True, outlier_factor=0.5):
+def fit_multisamp_gmm(X, covariance='full', detect_outliers='mad', outlier_factor=0.5,
+                      dbscan_eps=5, dbscan_min_samples=5,):
     '''
     Fit a gaussian mixture model to multiple samples. Each sample has its own
     GMM with its own weights but shares distributions with others. Returns
@@ -197,7 +213,10 @@ def fit_multisamp_gmm(X, covariance='full', add_uniform=True, outlier_factor=0.5
     '''
     try:
         with np.errstate(divide='ignore'):
-            gmms, dists = initialise_gmms(X, covariance, add_uniform, outlier_factor=outlier_factor)
+            gmms, dists = initialise_gmms(
+                X, covariance, detect_outliers, outlier_factor=outlier_factor,
+                dbscan_eps=dbscan_eps, dbscan_min_samples=dbscan_eps,
+            )
 
         with np.errstate(invalid='ignore', over='ignore'):
             gmms, dists = em(X, gmms, dists)
@@ -214,8 +233,9 @@ def fit_multisamp_gmm(X, covariance='full', add_uniform=True, outlier_factor=0.5
     return dists, combined_weights, per_samp_weights
 
 
-def fit_gmm(cntrl, treat, covariance='full', add_uniform=True,
+def fit_gmm(cntrl, treat, covariance='full', detect_outliers='mad',
             outlier_factor=0.5, max_fit_depth=1000,
+            dbscan_eps=5, dbscan_min_samples=5,
             random_state=None):
     '''
     Fits a multivariate, two-gaussian GMM to data and measures KL
@@ -228,7 +248,8 @@ def fit_gmm(cntrl, treat, covariance='full', add_uniform=True,
     ]
     dists, weights, per_samp_weights = fit_multisamp_gmm(
         pooled, covariance=covariance,
-        add_uniform=add_uniform, outlier_factor=outlier_factor
+        detect_outliers=detect_outliers, outlier_factor=outlier_factor,
+        dbscan_eps=dbscan_eps, dbscan_min_samples=dbscan_eps,
     )
 
     if covariance == 'full':
@@ -426,10 +447,10 @@ def position_stats(cntrl, treat, kmers,
         try:
             gmm, cntrl_preds, treat_preds, model_params = fit_gmm(
                 cntrl_fit_data, treat_fit_data,
-                centre=centre,
                 covariance=opts.covariance_type,
-                add_uniform=opts.add_uniform,
+                detect_outliers=opts.outlier_method if opts.add_uniform else None,
                 outlier_factor=opts.outlier_factor,
+                dbscan_eps=opts.dbscan_eps,
                 max_fit_depth=opts.max_fit_depth,
                 random_state=random_state,
             )

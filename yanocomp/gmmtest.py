@@ -287,11 +287,17 @@ class GMMTestOpts:
               type=click.Choice(['full', 'diag']), show_default=True,
               help=('Whether to use a full or diagonal only covariance matrix in multivariate '
                     'normal components'))
-@click.option('-u', '--add-uniform/--no-uniform', required=False, default=True, hidden=True,
+@click.option('-u', '--add-uniform/--no-uniform', required=False, default=True,
               help=('Whether to include a uniform component in GMMs to detect outliers caused by '
                     'alignment errors. Helps to improve the robustness of the modelling'))
+@click.option('-D', '--outlier-method', required=False, default='mad',
+              type=click.Choice(['mad', 'dbscan']), show_default=True,
+              help='Method used to initialise outliers in GMM')
 @click.option('-e', '--outlier-factor', required=False, default=0.5, show_default=True,
-              help=('Scaling factor for labelling outliers during model initialisation. '
+              help=('Scaling factor for labelling outliers during model initialisation with MAD. '
+                    'Smaller means more aggressive labelling of outliers'))
+@click.option('-E', '--dbscan-eps', required=False, default=5, show_default=True,
+              help=('Epsilon factor used for labelling outliers during model initialisation with DBSCAN. '
                     'Smaller means more aggressive labelling of outliers'))
 @click.option('-n', '--min-read-depth', required=False, default=None, type=int,
               callback=set_default_depth,
