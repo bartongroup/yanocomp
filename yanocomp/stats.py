@@ -427,6 +427,7 @@ def position_stats(cntrl, treat, kmers,
             gmm, cntrl_preds, treat_preds, model_params = fit_gmm(
                 cntrl_fit_data, treat_fit_data,
                 centre=centre,
+                covariance=opts.covariance_type,
                 add_uniform=opts.add_uniform,
                 outlier_factor=opts.outlier_factor,
                 max_fit_depth=opts.max_fit_depth,

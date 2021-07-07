@@ -283,6 +283,10 @@ class GMMTestOpts:
               help='Test at transcript level or aggregate to gene level')
 @click.option('-w', '--window-size', required=False, default=5, show_default=True,
               help='How many adjacent kmers to model over')
+@click.option('-C', '--covariance-type', required=False, default='full',
+              type=click.Choice(['full', 'diag']), show_default=True,
+              help=('Whether to use a full or diagonal only covariance matrix in multivariate '
+                    'normal components'))
 @click.option('-u', '--add-uniform/--no-uniform', required=False, default=True, hidden=True,
               help=('Whether to include a uniform component in GMMs to detect outliers caused by '
                     'alignment errors. Helps to improve the robustness of the modelling'))
