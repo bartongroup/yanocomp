@@ -296,9 +296,8 @@ class GMMTestOpts:
 @click.option('-e', '--outlier-factor', required=False, default=0.5, show_default=True,
               help=('Scaling factor for labelling outliers during model initialisation with MAD. '
                     'Smaller means more aggressive labelling of outliers'))
-@click.option('-E', '--dbscan-eps', required=False, default=5, show_default=True,
-              help=('Epsilon factor used for labelling outliers during model initialisation with DBSCAN. '
-                    'Smaller means more aggressive labelling of outliers'))
+@click.option('-E', '--dbscan-eps', required=False, default=5, type=float, show_default=True,
+              help='Epsilon factor used for labelling outliers during model initialisation with DBSCAN.')
 @click.option('-n', '--min-read-depth', required=False, default=None, type=int,
               callback=set_default_depth,
               help='Minimum reads per replicate to test a position. Default is to set dynamically')
