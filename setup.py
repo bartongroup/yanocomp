@@ -3,7 +3,7 @@ from setuptools import setup
 
 setup(
     name='yanocomp',
-    version='0.1',
+    version='0.2',
     description=(
         'GMM tests for analysis of differential RNA modifications'
     ),
