@@ -281,14 +281,23 @@ class GMMTestOpts:
 @click.option('--test-level', required=False, default='gene',
               type=click.Choice(['gene', 'transcript']), show_default=True,
               help='Test at transcript level or aggregate to gene level')
-@click.option('-w', '--window-size', required=False, default=5, show_default=True,
+@click.option('-w', '--window-size', required=False, default=3, show_default=True,
               help='How many adjacent kmers to model over')
-@click.option('-u', '--add-uniform/--no-uniform', required=False, default=True, hidden=True,
+@click.option('-C', '--covariance-type', required=False, default='full',
+              type=click.Choice(['full', 'diag']), show_default=True,
+              help=('Whether to use a full or diagonal only covariance matrix in multivariate '
+                    'normal components'))
+@click.option('-u', '--add-uniform/--no-uniform', required=False, default=True,
               help=('Whether to include a uniform component in GMMs to detect outliers caused by '
                     'alignment errors. Helps to improve the robustness of the modelling'))
+@click.option('-D', '--outlier-method', required=False, default='mad',
+              type=click.Choice(['mad', 'dbscan']), show_default=True,
+              help='Method used to initialise outliers in GMM')
 @click.option('-e', '--outlier-factor', required=False, default=0.5, show_default=True,
-              help=('Scaling factor for labelling outliers during model initialisation. '
+              help=('Scaling factor for labelling outliers during model initialisation with MAD. '
                     'Smaller means more aggressive labelling of outliers'))
+@click.option('-E', '--dbscan-eps', required=False, default=5, type=float, show_default=True,
+              help='Epsilon factor used for labelling outliers during model initialisation with DBSCAN.')
 @click.option('-n', '--min-read-depth', required=False, default=None, type=int,
               callback=set_default_depth,
               help='Minimum reads per replicate to test a position. Default is to set dynamically')
@@ -298,6 +307,8 @@ class GMMTestOpts:
               help='Minimum KS test statistic to attempt to build a model for a position')
 @click.option('-f', '--fdr-threshold', required=False, default=0.05, show_default=True,
               help='False discovery rate threshold for output')
+@click.option('--gmm/--no-gmm', required=False, default=True,
+              help='Do not attempt to model with GMM. P values/FDRs are for KS test only')
 @click.option('-p', '--processes', required=False, show_default=True,
               default=1, type=click.IntRange(1, None))
 @click.option('--test-gene', required=False, default=None, hidden=True, multiple=True)
@@ -307,8 +318,15 @@ def gmm_test(opts):
     '''
     Differential RNA modifications using nanopore DRS signal level data
     '''
+    if not opts.gmm:
+        mode = 'KS-only'
+    elif not opts.add_uniform:
+        mode = '2-comp GMM'
+    else:
+        mode = '3-comp GMM (uniform outliers)'
     logger.info(
-        f'Running gmmtest with {len(opts.cntrl_hdf5_fns):,} control '
+        f'Running gmmtest in {mode} mode '
+        f'with {len(opts.cntrl_hdf5_fns):,} control '
         f'datasets and {len(opts.treat_hdf5_fns):,} treatment datasets'
     )
     if not len(opts.test_gene):
@@ -331,12 +349,12 @@ def gmm_test(opts):
         if len(res):
             _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
 
-    res, sm_preds = assign_modified_distribution(
-        *filter_results(res, sm_preds, opts.fdr_threshold), opts.model
-    )
+    res, sm_preds = filter_results(res, sm_preds, opts.fdr_threshold)
+    if opts.gmm:
+        res, sm_preds = assign_modified_distribution(res, sm_preds, opts.model)
 
     save_gmmtest_results(res, opts.output_bed_fn)
-    if opts.generate_sm_preds:
+    if opts.gmm and opts.generate_sm_preds:
         save_sm_preds(
             sm_preds,
             opts.cntrl_hdf5_fns, opts.treat_hdf5_fns,

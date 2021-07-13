@@ -1,15 +1,18 @@
+import logging
 from collections import defaultdict
 import dataclasses
 
 import numpy as np
 import pandas as pd
 from scipy import stats
-#from statsmodels.multivariate.pca import PCA
 from statsmodels.stats.contingency_tables import Table2x2
+from sklearn.cluster import DBSCAN
 import pomegranate as pm
 
 from .io import load_model_priors
 
+
+logger = logging.getLogger('yanocomp')
 
 N_COMPONENTS = 2
 
@@ -75,47 +78,96 @@ def median_absolute_deviation(arr):
     return np.median(np.abs(arr - np.median(arr)))
 
 
-def kmeans_init_clusters(X, detect_outliers=True, init_method='first-k',
-                         batch_size=100, max_iter=4, outlier_factor=0.5):
+def kmeans_init_clusters(X, detect_outliers='mad', init_method='kmeans++',
+                         max_iter=100, stop_threshold=0.5,
+                         outlier_factor=0.5,
+                         dbscan_eps=5, dbscan_min_samples='auto'):
     '''
     Get predictions for initialising GMM using KMeans. Outliers are detected
     by calculating the MAD of the distances to the nearest centroid, and then
     labelling all values with a dist of > outlier_factor * MAD as outliers.
     '''
-    kmeans = pm.Kmeans(N_COMPONENTS, init=init_method)
-    kmeans.fit(X, batch_size=batch_size, max_iterations=max_iter)
+    # if using dbscan to detect outliers, we can do this first
+    if detect_outliers == 'dbscan':
+        if dbscan_min_samples == 'auto':
+            dbscan_min_samples = 0.25 * len(X)
+        dbscan = DBSCAN(
+            eps=dbscan_eps,
+            min_samples=dbscan_min_samples,
+            metric='euclidean'
+        )
+        outlier_mask = dbscan.fit_predict(X) == -1
+        if sum(outlier_mask) == len(outlier_mask):
+            return np.full(len(outlier_mask), N_COMPONENTS, dtype=int)
+        else:
+            # ignore outliers in kmeans fit - should help a bit
+            X_fit = X[~outlier_mask]
+    else:
+        X_fit = X
+
+    kmeans = pm.Kmeans(
+        N_COMPONENTS,
+        init=init_method,
+        n_init=1 if init_method == 'first-k' else 3
+    )
+    kmeans.fit(X_fit, max_iterations=max_iter, stop_threshold=stop_threshold)
     centroid_dists = kmeans.distance(X)
     init_pred = np.argmin(centroid_dists, axis=1)
-    if detect_outliers:
-        dists = np.min(centroid_dists, axis=1)
-        mad = median_absolute_deviation(dists)
-        outlier_mask = dists > outlier_factor * mad
+    if detect_outliers is not None:
+        if detect_outliers == 'mad':
+            dists = np.min(centroid_dists, axis=1)
+            mad = median_absolute_deviation(dists)
+            outlier_mask = dists > outlier_factor * mad
+        # label outliers as new cluster
         init_pred[outlier_mask] = N_COMPONENTS
+        
     return init_pred
 
 
-def initialise_gmms(X, add_uniform=True, init_method='first-k',
-                    batch_size=100, max_iter=4, pseudocount=0.5,
-                    outlier_factor=0.5):
+def initialise_gmms(X, covariance='full', detect_outliers=True,
+                    init_method='kmeans++',
+                    max_iter=100, pseudocount=0.5,
+                    outlier_factor=0.5,
+                    dbscan_eps=5, dbscan_min_samples='auto'):
     '''
     Uses K-means to initialise 2-component GMM.
     Optionally adds a uniform dist to account for poorly aligned reads
     '''
     samp_sizes = [len(samp) for samp in X]
     X_pooled = np.concatenate(X)
+    n_dim = X_pooled.shape[1]
 
     init_pred = kmeans_init_clusters(
-        X_pooled, detect_outliers=add_uniform,
+        X_pooled, detect_outliers=detect_outliers,
         init_method=init_method,
-        batch_size=batch_size, max_iter=max_iter,
-        outlier_factor=outlier_factor
+        max_iter=max_iter,
+        outlier_factor=outlier_factor,
+        dbscan_eps=dbscan_eps, dbscan_min_samples=dbscan_min_samples,
     )
-    dists = [
-        pm.MultivariateGaussianDistribution.from_samples(X_pooled[init_pred == i])
-        for i in range(N_COMPONENTS)
-    ]
 
-    ncomp = N_COMPONENTS + int(add_uniform)
+    if covariance == 'full':
+        dists = [
+            pm.MultivariateGaussianDistribution.from_samples(X_pooled[init_pred == i])
+            for i in range(N_COMPONENTS)
+        ]
+    elif covariance == 'diag':
+        dists = []
+        for i in range(N_COMPONENTS):
+            X_i = X_pooled[init_pred == i]
+            if len(X_i) == 0:
+                dists.append(pm.IndependentComponentsDistribution([
+                    pm.NormalDistribution(0, 1)
+                    for j in range(n_dim)
+                ]))
+            else:
+                dists.append(pm.IndependentComponentsDistribution([
+                    pm.NormalDistribution(X_i[:, j].mean(), X_i[:, j].std())
+                    for j in range(n_dim)
+                ]))
+    else:
+        raise ValueError('Only full and diag covariances are supported')
+
+    ncomp = N_COMPONENTS + int(detect_outliers is not None)
     per_samp_preds = np.array_split(init_pred, np.cumsum(samp_sizes)[:-1])
 
     weights = [
@@ -123,7 +175,7 @@ def initialise_gmms(X, add_uniform=True, init_method='first-k',
             len(pred) + pseudocount * ncomp)
         for pred in per_samp_preds
     ]
-    if add_uniform:
+    if detect_outliers is not None:
         outliers = X_pooled[init_pred == N_COMPONENTS]
         if len(outliers) == 0:
             # set params using all data
@@ -139,9 +191,10 @@ def initialise_gmms(X, add_uniform=True, init_method='first-k',
     return gmms, dists
 
 
-def em(X, gmms, dists, max_iterations=1e8, stop_threshold=0.1,
+def em(X, gmms, dists, max_iterations=1e3, stop_threshold=0.1,
        inertia=0.01, lr_decay=1e-3, pseudocount=0.5):
     '''Perform expectation maximisation'''
+    samp_sizes = [len(samp) for samp in X]
     initial_log_probability_sum = -np.inf
     iteration, improvement = 0, np.inf
     # perform EM
@@ -168,10 +221,12 @@ def em(X, gmms, dists, max_iterations=1e8, stop_threshold=0.1,
 
         iteration += 1
         last_log_probability_sum = log_probability_sum
+        per_samp_weights = np.array([np.exp(gmm.weights) for gmm in gmms])
     return gmms, dists
 
 
-def fit_multisamp_gmm(X, add_uniform=True, outlier_factor=0.5):
+def fit_multisamp_gmm(X, covariance='full', detect_outliers='mad', outlier_factor=0.5,
+                      dbscan_eps=5, dbscan_min_samples='auto',):
     '''
     Fit a gaussian mixture model to multiple samples. Each sample has its own
     GMM with its own weights but shares distributions with others. Returns
@@ -179,7 +234,10 @@ def fit_multisamp_gmm(X, add_uniform=True, outlier_factor=0.5):
     '''
     try:
         with np.errstate(divide='ignore'):
-            gmms, dists = initialise_gmms(X, add_uniform, outlier_factor=outlier_factor)
+            gmms, dists = initialise_gmms(
+                X, covariance, detect_outliers, outlier_factor=outlier_factor,
+                dbscan_eps=dbscan_eps, dbscan_min_samples=dbscan_min_samples,
+            )
 
         with np.errstate(invalid='ignore', over='ignore'):
             gmms, dists = em(X, gmms, dists)
@@ -196,8 +254,9 @@ def fit_multisamp_gmm(X, add_uniform=True, outlier_factor=0.5):
     return dists, combined_weights, per_samp_weights
 
 
-def fit_gmm(cntrl, treat, centre, add_uniform=True,
+def fit_gmm(cntrl, treat, covariance='full', detect_outliers='mad',
             outlier_factor=0.5, max_fit_depth=1000,
+            dbscan_eps=5, dbscan_min_samples='auto',
             random_state=None):
     '''
     Fits a multivariate, two-gaussian GMM to data and measures KL
@@ -209,13 +268,29 @@ def fit_gmm(cntrl, treat, centre, add_uniform=True,
         subsample(samp, max_fit_depth, random_state) for samp in cntrl + treat
     ]
     dists, weights, per_samp_weights = fit_multisamp_gmm(
-        pooled, add_uniform=add_uniform, outlier_factor=outlier_factor
+        pooled, covariance=covariance,
+        detect_outliers=detect_outliers, outlier_factor=outlier_factor,
+        dbscan_eps=dbscan_eps, dbscan_min_samples=dbscan_min_samples,
     )
 
-    model_params = (
-        dists[0].mu, dists[1].mu,
-        np.sqrt(np.diagonal(dists[0].cov)), np.sqrt(np.diagonal(dists[1].cov))
-    )
+    if covariance == 'full':
+        model_params = (
+            dists[0].mu, dists[1].mu,
+            np.sqrt(np.diagonal(dists[0].cov)), np.sqrt(np.diagonal(dists[1].cov))
+        )
+    elif covariance == 'diag':
+        mu_1, std_1 = zip(
+            *[d.parameters for d in dists[0]]
+        )
+        mu_2, std_2 = zip(
+            *[d.parameters for d in dists[1]]
+        )
+        model_params = [
+            np.array(mu_1), np.array(mu_2),
+            np.array(std_1), np.array(std_2)
+        ]
+    else:
+        raise ValueError('Only full and diag covariances are supported')
     
     # use weights to estimate per-sample mod rates
     preds = np.round(per_samp_weights * samp_sizes[:, np.newaxis])
@@ -270,8 +345,9 @@ def calculate_fractional_stats(cntrl_preds, treat_preds, pseudocount=0.5, ci=95)
     '''
     cntrl_pred = cntrl_preds.sum(0)
     treat_pred = treat_preds.sum(0)
-    cntrl_frac_upper = cntrl_pred[1] / cntrl_pred[:N_COMPONENTS].sum()
-    treat_frac_upper = treat_pred[1] / treat_pred[:N_COMPONENTS].sum()
+    with np.errstate(invalid='ignore'):
+        cntrl_frac_upper = cntrl_pred[1] / cntrl_pred[:N_COMPONENTS].sum()
+        treat_frac_upper = treat_pred[1] / treat_pred[:N_COMPONENTS].sum()
 
     ct = Table2x2([cntrl_pred[:N_COMPONENTS], treat_pred[:N_COMPONENTS]], shift_zeros=True)
     log_odds = ct.log_oddsratio
@@ -305,16 +381,35 @@ def format_sm_preds(sm_preds, sm_outlier, events):
 
 def format_model(gmm):
     '''Create a json serialisable dict of GMM parameters'''
-    model_json = {
-        'unmod': {
-            'mu': gmm.distributions[0].mu.tolist(),
-            'cov': gmm.distributions[0].cov.tolist(),
-        },
-        'mod': {
-            'mu': gmm.distributions[1].mu.tolist(),
-            'cov': gmm.distributions[1].cov.tolist(),
-        },
-    }
+    try:
+        model_json = {
+            'unmod': {
+                'mu': gmm.distributions[0].mu.tolist(),
+                'cov': gmm.distributions[0].cov.tolist(),
+            },
+            'mod': {
+                'mu': gmm.distributions[1].mu.tolist(),
+                'cov': gmm.distributions[1].cov.tolist(),
+            },
+        }
+    except AttributeError:
+        # model is IndependentComponentsDistribution (diagonal covariance)
+        mu_1, std_1 = zip(
+            *[d.parameters for d in gmm.distributions[0]]
+        )
+        cov_1 = np.diag(std_1 ** 2)
+        mu_2, std_2 = zip(
+            *[d.parameters for d in gmm.distributions[1]]
+        )
+        cov_2 = np.diag(std_2 ** 2)
+        model_json = {
+            'unmod': {
+                'mu': mu_1, 'cov': cov_1,
+            },
+            'mod': {
+                'mu': mu_2, 'cov': cov_2,
+            },
+        }
     if len(gmm.distributions) == (N_COMPONENTS + 1):
         outlier = gmm.distributions[2]
         model_json['outlier'] = {
@@ -362,6 +457,9 @@ def position_stats(cntrl, treat, kmers,
         max_size=opts.max_fit_depth,
         random_state=random_state,
     )
+    if not opts.gmm: # no modelling
+        r.p_val = ks_p_val
+        return True, r, None
 
     # if there is we can perform the GMM fit and subsequent G test
     if r.ks_stat >= opts.min_ks and ks_p_val < opts.fdr_threshold:
@@ -370,9 +468,10 @@ def position_stats(cntrl, treat, kmers,
         try:
             gmm, cntrl_preds, treat_preds, model_params = fit_gmm(
                 cntrl_fit_data, treat_fit_data,
-                centre=centre,
-                add_uniform=opts.add_uniform,
+                covariance=opts.covariance_type,
+                detect_outliers=opts.outlier_method if opts.add_uniform else None,
                 outlier_factor=opts.outlier_factor,
+                dbscan_eps=opts.dbscan_eps,
                 max_fit_depth=opts.max_fit_depth,
                 random_state=random_state,
             )

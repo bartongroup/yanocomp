@@ -3,7 +3,7 @@ from setuptools import setup
 
 setup(
     name='yanocomp',
-    version='0.1',
+    version='0.2',
     description=(
         'GMM tests for analysis of differential RNA modifications'
     ),
@@ -28,6 +28,7 @@ setup(
         'pandas>=1.1',
         'statsmodels',
         'pomegranate>=0.13',
+        'scikit-learn',
         'h5py>=2.10',
         'click',
         'click_log',
