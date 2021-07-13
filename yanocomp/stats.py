@@ -78,8 +78,9 @@ def median_absolute_deviation(arr):
     return np.median(np.abs(arr - np.median(arr)))
 
 
-def kmeans_init_clusters(X, detect_outliers='mad', init_method='first-k',
-                         batch_size=100, max_iter=4, outlier_factor=0.5,
+def kmeans_init_clusters(X, detect_outliers='mad', init_method='kmeans++',
+                         max_iter=100, stop_threshold=0.5,
+                         outlier_factor=0.5,
                          dbscan_eps=5, dbscan_min_samples='auto'):
     '''
     Get predictions for initialising GMM using KMeans. Outliers are detected
@@ -104,8 +105,12 @@ def kmeans_init_clusters(X, detect_outliers='mad', init_method='first-k',
     else:
         X_fit = X
 
-    kmeans = pm.Kmeans(N_COMPONENTS, init=init_method)
-    kmeans.fit(X_fit, batch_size=batch_size, max_iterations=max_iter)
+    kmeans = pm.Kmeans(
+        N_COMPONENTS,
+        init=init_method,
+        n_init=1 if init_method == 'first-k' else 3
+    )
+    kmeans.fit(X_fit, max_iterations=max_iter, stop_threshold=stop_threshold)
     centroid_dists = kmeans.distance(X)
     init_pred = np.argmin(centroid_dists, axis=1)
     if detect_outliers is not None:
@@ -120,8 +125,8 @@ def kmeans_init_clusters(X, detect_outliers='mad', init_method='first-k',
 
 
 def initialise_gmms(X, covariance='full', detect_outliers=True,
-                    init_method='first-k',
-                    batch_size=100, max_iter=4, pseudocount=0.5,
+                    init_method='kmeans++',
+                    max_iter=100, pseudocount=0.5,
                     outlier_factor=0.5,
                     dbscan_eps=5, dbscan_min_samples='auto'):
     '''
@@ -135,7 +140,7 @@ def initialise_gmms(X, covariance='full', detect_outliers=True,
     init_pred = kmeans_init_clusters(
         X_pooled, detect_outliers=detect_outliers,
         init_method=init_method,
-        batch_size=batch_size, max_iter=max_iter,
+        max_iter=max_iter,
         outlier_factor=outlier_factor,
         dbscan_eps=dbscan_eps, dbscan_min_samples=dbscan_min_samples,
     )
@@ -163,7 +168,6 @@ def initialise_gmms(X, covariance='full', detect_outliers=True,
         raise ValueError('Only full and diag covariances are supported')
 
     ncomp = N_COMPONENTS + int(detect_outliers is not None)
-    logger.debug(f'Initial weights: {np.bincount(init_pred, minlength=ncomp) / len(init_pred)}')
     per_samp_preds = np.array_split(init_pred, np.cumsum(samp_sizes)[:-1])
 
     weights = [
@@ -187,16 +191,14 @@ def initialise_gmms(X, covariance='full', detect_outliers=True,
     return gmms, dists
 
 
-def em(X, gmms, dists, max_iterations=1e8, stop_threshold=0.1,
+def em(X, gmms, dists, max_iterations=1e3, stop_threshold=0.1,
        inertia=0.01, lr_decay=1e-3, pseudocount=0.5):
     '''Perform expectation maximisation'''
     samp_sizes = [len(samp) for samp in X]
     initial_log_probability_sum = -np.inf
     iteration, improvement = 0, np.inf
     # perform EM
-    logger.debug('performing EM')
     while improvement > stop_threshold and iteration < max_iterations + 1:
-        logger.debug(f'Iteration {iteration + 1}')
         step_size = 1 - ((1 - inertia) * (2 + iteration) ** -lr_decay)
         if iteration:
             for d in dists:
@@ -220,7 +222,6 @@ def em(X, gmms, dists, max_iterations=1e8, stop_threshold=0.1,
         iteration += 1
         last_log_probability_sum = log_probability_sum
         per_samp_weights = np.array([np.exp(gmm.weights) for gmm in gmms])
-        logger.debug(f'New weights: {np.average(per_samp_weights, axis=0, weights=samp_sizes)}')
     return gmms, dists
 
 
@@ -462,7 +463,6 @@ def position_stats(cntrl, treat, kmers,
 
     # if there is we can perform the GMM fit and subsequent G test
     if r.ks_stat >= opts.min_ks and ks_p_val < opts.fdr_threshold:
-        logger.debug(f'Fitting GMM to kmer {kmer}')
         cntrl_fit_data = [c.values for _, c in cntrl.groupby('replicate', sort=False)]
         treat_fit_data = [t.values for _, t in treat.groupby('replicate', sort=False)]
         try:

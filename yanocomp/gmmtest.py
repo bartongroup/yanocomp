@@ -281,7 +281,7 @@ class GMMTestOpts:
 @click.option('--test-level', required=False, default='gene',
               type=click.Choice(['gene', 'transcript']), show_default=True,
               help='Test at transcript level or aggregate to gene level')
-@click.option('-w', '--window-size', required=False, default=5, show_default=True,
+@click.option('-w', '--window-size', required=False, default=3, show_default=True,
               help='How many adjacent kmers to model over')
 @click.option('-C', '--covariance-type', required=False, default='full',
               type=click.Choice(['full', 'diag']), show_default=True,
