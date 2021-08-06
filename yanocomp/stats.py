@@ -59,17 +59,38 @@ def subsample(arr, max_size, random_state):
         return arr[idx]
 
 
-def pca_kstest(cntrl_data, treat_data, max_size, random_state):
+def pca_kstest(cond_a, cond_b):
     '''
     Transform multivariate data to univariate using PCA and perform
     Kolmogorov-Smirnov test
     '''
-    cntrl_data = subsample(cntrl_data, max_size, random_state)
-    treat_data = subsample(treat_data, max_size, random_state)
-    n_cntrl = len(cntrl_data)
-    pooled = np.concatenate([cntrl_data, treat_data])
+    n_a = len(cond_a)
+    pooled = np.concatenate([cond_a, cond_b])
     comps = pca_comp1(pooled)
-    ks, p_val = ks_2samp(comps[:n_cntrl], comps[n_cntrl:], comps)
+    ks, p_val = ks_2samp(comps[:n_a], comps[n_a:], comps)
+    return ks, p_val
+
+
+def multisamp_pca_kstest(event_tables, max_size, random_state):
+    '''
+    Transform multivariate data to univariate using PCA and perform
+    Kolmogorov-Smirnov test
+    '''
+    event_tables = [subsample(et.values, max_size, random_state) for et in event_tables]
+    if len(event_tables) == 2:
+        cond_a, cond_b = event_tables
+        ks, p_val = pca_kstest(cond_a, cond_b)
+    elif len(event_tables) > 2:
+        _ks = []
+        _pval = []
+        for i, j in zip(*np.triu_indices(len(event_tables), 1)):
+            cond_a, cond_b = event_tables[i], event_tables[j]
+            ks, pval = pca_kstest(cond_a, cond_b)
+            _ks.append(ks)
+            _pval.append(pval)
+        _, _pval = fdrcorrection(np.array(_pval))
+        i = np.argmax(_ks)
+        ks, p_val = _ks[i], _pval[i]
     return ks, p_val
 
 
@@ -254,7 +275,7 @@ def fit_multisamp_gmm(X, covariance='full', detect_outliers='mad', outlier_facto
     return dists, combined_weights, per_samp_weights
 
 
-def fit_gmm(cntrl, treat, covariance='full', detect_outliers='mad',
+def fit_gmm(X, covariance='full', detect_outliers='mad',
             outlier_factor=0.5, max_fit_depth=1000,
             dbscan_eps=5, dbscan_min_samples='auto',
             random_state=None):
@@ -262,13 +283,12 @@ def fit_gmm(cntrl, treat, covariance='full', detect_outliers='mad',
     Fits a multivariate, two-gaussian GMM to data and measures KL
     divergence of the resulting distributions.
     '''
-    n_cntrl = len(cntrl)
-    samp_sizes = np.array([len(samp) for samp in cntrl + treat])
-    pooled = [
-        subsample(samp, max_fit_depth, random_state) for samp in cntrl + treat
+    samp_sizes = np.array([len(samp) for samp in X])
+    X_subsamp = [
+        subsample(samp, max_fit_depth, random_state) for samp in X
     ]
     dists, weights, per_samp_weights = fit_multisamp_gmm(
-        pooled, covariance=covariance,
+        X_subsamp, covariance=covariance,
         detect_outliers=detect_outliers, outlier_factor=outlier_factor,
         dbscan_eps=dbscan_eps, dbscan_min_samples=dbscan_min_samples,
     )
@@ -294,12 +314,11 @@ def fit_gmm(cntrl, treat, covariance='full', detect_outliers='mad',
     
     # use weights to estimate per-sample mod rates
     preds = np.round(per_samp_weights * samp_sizes[:, np.newaxis])
-    cntrl_preds, treat_preds = preds[:n_cntrl], preds[n_cntrl:]
     gmm = pm.GeneralMixtureModel(dists, weights)
-    return gmm, cntrl_preds, treat_preds, model_params
+    return gmm, preds, model_params
 
 
-def two_cond_g_test(counts):
+def _g_test(counts):
     '''
     G test, catch errors caused by rows/columns with all zeros
     '''
@@ -313,24 +332,30 @@ def two_cond_g_test(counts):
         return 0.0, 1.0
 
 
-def gmm_g_test(cntrl_preds, treat_preds, p_val_threshold=0.05):
+def _groupby_sum(counts, labels):
+    agg = []
+    for i in range(counts.shape[-1]):
+        agg.append(np.bincount(labels, counts[:, i]))
+    return np.stack(agg, axis=1)
+
+
+def g_test_with_homogeneity(preds, conds, p_val_threshold=0.05):
     '''
     Perform G tests for differential modification and within-condition
     homogeneity
     '''
+    per_cond_counts = _groupby_sum(preds, conds)
     with np.errstate(invalid='raise'):
         try:
-            het_g, p_val = two_cond_g_test([
-                cntrl_preds[:, :2].sum(0), treat_preds[:, :2].sum(0)
-            ])
+            het_g, p_val = _g_test(per_cond_counts[:, :N_COMPONENTS]) # do not include outliers
         except FloatingPointError:
             # all classified as outliers!
-            het_g = np.nan
-            p_val = 1
+            het_g = 0.0
+            p_val = 1.0
     if p_val < p_val_threshold:
-        cntrl_hom_g, _, = two_cond_g_test(cntrl_preds)
-        treat_hom_g, _, = two_cond_g_test(treat_preds)
-        hom_g = cntrl_hom_g + treat_hom_g
+        hom_g = 0
+        for c in np.unique(conds):
+            hom_g += _g_test(preds[conds == c])[0]
         if hom_g >= het_g:
             p_val = 1
     else:
@@ -338,21 +363,24 @@ def gmm_g_test(cntrl_preds, treat_preds, p_val_threshold=0.05):
     return het_g, hom_g, p_val
 
 
-def calculate_fractional_stats(cntrl_preds, treat_preds, pseudocount=0.5, ci=95):
+def calculate_fractional_stats(preds, conds, pseudocount=0.5, ci=95):
     '''
     Returns the relative modification rates (ignoring outliers) for treat
     and cntrl samples. Also calculates log ratio of mod:unmod reads.
     '''
-    cntrl_pred = cntrl_preds.sum(0)
-    treat_pred = treat_preds.sum(0)
-    with np.errstate(invalid='ignore'):
-        cntrl_frac_upper = cntrl_pred[1] / cntrl_pred[:N_COMPONENTS].sum()
-        treat_frac_upper = treat_pred[1] / treat_pred[:N_COMPONENTS].sum()
+    preds = _groupby_sum(preds, conds)
 
-    ct = Table2x2([cntrl_pred[:N_COMPONENTS], treat_pred[:N_COMPONENTS]], shift_zeros=True)
-    log_odds = ct.log_oddsratio
-    log_odds_ci = ct.log_oddsratio_confint(alpha=1 - ci / 100)
-    return cntrl_frac_upper, treat_frac_upper, log_odds, *log_odds_ci
+    with np.errstate(invalid='ignore'):
+        frac_upper = np.array([p[1] / p[:N_COMPONENTS].sum() for p in preds])
+
+    if len(preds) == 2:
+        ct = Table2x2([preds[0][:N_COMPONENTS], preds[1][:N_COMPONENTS]], shift_zeros=True)
+        log_odds = ct.log_oddsratio
+        log_odds_ci = ct.log_oddsratio_confint(alpha=1 - ci / 100)
+    else:
+        log_odds = np.nan
+        log_odds_ci = (np.nan, np.nan)
+    return frac_upper, log_odds, *log_odds_ci
 
 
 def format_sm_preds(sm_preds, sm_outlier, events):
@@ -431,8 +459,7 @@ class GMMTestResults:
     log_odds_upper_ci: float = np.nan
     p_val: float = 1.
     fdr: float = 1.
-    cntrl_frac_mod: float = np.nan
-    treat_frac_mod: float = np.nan
+    frac_mod: np.ndarray = None
     g_stat: float = np.nan
     hom_g_stat: float = np.nan
     dist1_means: np.ndarray = None
@@ -442,7 +469,7 @@ class GMMTestResults:
     ks_stat: float = np.nan
 
 
-def position_stats(cntrl, treat, kmers,
+def position_stats(event_tables, kmers,
                    opts, random_state=None):
     '''
     Fits the GMM, estimates mod rates/changes, and performs G test
@@ -451,9 +478,10 @@ def position_stats(cntrl, treat, kmers,
     centre = window_size // 2
     kmer = kmers[centre]
     r = GMMTestResults(kmer=kmer, kmers=kmers, centre=centre)
+    n_conds = len(event_tables)
     # first test that there is actually some difference in cntrl/treat
-    r.ks_stat, ks_p_val = pca_kstest(
-        cntrl.values, treat.values,
+    r.ks_stat, ks_p_val = multisamp_pca_kstest(
+        event_tables,
         max_size=opts.max_fit_depth,
         random_state=random_state,
     )
@@ -463,11 +491,15 @@ def position_stats(cntrl, treat, kmers,
 
     # if there is we can perform the GMM fit and subsequent G test
     if r.ks_stat >= opts.min_ks and ks_p_val < opts.fdr_threshold:
-        cntrl_fit_data = [c.values for _, c in cntrl.groupby('replicate', sort=False)]
-        treat_fit_data = [t.values for _, t in treat.groupby('replicate', sort=False)]
+        event_table_data, conds = zip(*[
+            (rep.values, cond)
+            for cond, et in enumerate(event_tables)
+            for _, rep in et.groupby('replicate', sort=False)
+        ])
+        conds = np.array(conds)
         try:
-            gmm, cntrl_preds, treat_preds, model_params = fit_gmm(
-                cntrl_fit_data, treat_fit_data,
+            gmm, preds, model_params = fit_gmm(
+                event_table_data,
                 covariance=opts.covariance_type,
                 detect_outliers=opts.outlier_method if opts.add_uniform else None,
                 outlier_factor=opts.outlier_factor,
@@ -480,31 +512,29 @@ def position_stats(cntrl, treat, kmers,
 
         r.dist1_means, r.dist2_means, r.dist1_stds, r.dist2_stds = model_params
  
-        r.g_stat, r.hom_g_stat, r.p_val = gmm_g_test(
-            cntrl_preds, treat_preds,
-            p_val_threshold=opts.fdr_threshold
+        r.g_stat, r.hom_g_stat, r.p_val = g_test_with_homogeneity(
+            preds, conds, p_val_threshold=opts.fdr_threshold
         )
 
-        frac_stats = calculate_fractional_stats(cntrl_preds, treat_preds)
-        (
-            r.cntrl_frac_mod, r.treat_frac_mod,
-            r.log_odds, r.log_odds_lower_ci, r.log_odds_upper_ci
-        ) = frac_stats
+        frac_stats = calculate_fractional_stats(preds, conds)
+        r.frac_mod, r.log_odds, r.log_odds_lower_ci, r.log_odds_upper_ci = frac_stats
 
         if r.p_val < opts.fdr_threshold and opts.generate_sm_preds:
-            cntrl_prob = gmm.predict_proba(np.concatenate(cntrl_fit_data))[:, 1:].T
-            treat_prob = gmm.predict_proba(np.concatenate(treat_fit_data))[:, 1:].T
+            prob = [
+                gmm.predict_proba(et.values)[:, 1:].T # not yet generalised to N_COMPONENTS
+                for et in event_tables
+            ]
             if opts.add_uniform:
-                cntrl_prob, cntrl_outlier = cntrl_prob
-                treat_prob, treat_outlier = treat_prob
+                prob, outlier = zip(*prob)
             else:
-                cntrl_outlier = np.zeros_like(cntrl_prob)
-                treat_outlier = np.zeros_like(treat_prob)
+                outlier = np.zeros_like(prob)
             sm_preds = {
                 'kmers': kmers.tolist(),
                 'model': format_model(gmm),
-                'cntrl': format_sm_preds(cntrl_prob, cntrl_outlier, cntrl),
-                'treat': format_sm_preds(treat_prob, treat_outlier, treat),
+                'conds': {
+                    i: format_sm_preds(p, o, et)
+                    for i, (et, p, o) in enumerate(zip(event_tables, prob, outlier))
+                }
             }
         else:
             sm_preds = None
@@ -570,9 +600,8 @@ def assign_modified_distribution(results, sm_preds,
         kmers, dist1_means, dist2_means = results.loc[i, ['kmers', 'dist1_means', 'dist2_means']]
         if dist1_is_modified(kmers, dist1_means, dist2_means, kmer_shift_dirs):
             # higher is unmod, flip the values
-            results.loc[i, 'cntrl_frac_mod'] = 1 - results.loc[i, 'cntrl_frac_mod']
-            results.loc[i, 'treat_frac_mod'] = 1 - results.loc[i, 'treat_frac_mod']
-            results.loc[i, 'log_odds'] = np.negative(results.loc[i, 'log_odds'])
+            results.at[i, 'frac_mod'] = 1 - results.at[i, 'frac_mod']
+            results.at[i, 'log_odds'] = np.negative(results.at[i, 'log_odds'])
             results.loc[i, ['log_odds_lower_ci', 'log_odds_upper_ci']] = np.negative(
                 results.loc[i, ['log_odds_upper_ci', 'log_odds_lower_ci']]
             )
@@ -590,8 +619,8 @@ def assign_modified_distribution(results, sm_preds,
                 continue
             m = pos_sm_preds['model']
             m['unmod'], m['mod'] = m['mod'], m['unmod']
-            for cond in ['cntrl', 'treat']:
-                for rep_sm_preds in pos_sm_preds[cond].values():
+            for cond in pos_sm_preds['conds']:
+                for rep_sm_preds in pos_sm_preds['conds'][cond].values():
                     rep_sm_preds['preds'] = [
                         1 - (p + o) for p, o in zip(rep_sm_preds['preds'],
                                                     rep_sm_preds['outlier_preds'])

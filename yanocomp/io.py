@@ -373,7 +373,7 @@ def save_gmmtest_results(res, output_bed_fn):
             (chrom, pos, gene_id, strand, kmer,
              kmers, centre,
              log_odds, lb, ub,
-             pval, fdr, c_fm, t_fm,
+             pval, fdr, fm,
              g_stat, hom_g_stat,
              unmod_mus, unmod_stds, mod_mus, mod_stds,
              ks) = record
@@ -385,12 +385,12 @@ def save_gmmtest_results(res, output_bed_fn):
                 unmod_mu, unmod_std, mod_mu, mod_std = np.nan, np.nan, np.nan, np.nan
             with np.errstate(divide='ignore'):
                 score = int(round(min(- np.log10(fdr), 100)))
+            fm = ','.join([f'{f:.2f}' for f in fm])
             bed_record = (
                 f'{chrom:s}\t{pos - 2:d}\t{pos + 3:d}\t'
                 f'{gene_id}:{kmer}\t{score:d}\t{strand:s}\t'
                 f'{log_odds:.2f}[{lb:.2f},{ub:.2f}]\t'
-                f'{pval:.2g}\t{fdr:.2g}\t'
-                f'{c_fm:.2f}\t{t_fm:.2f}\t'
+                f'{pval:.2g}\t{fdr:.2g}\t{fm:s}\t'
                 f'{g_stat:.2f}\t{hom_g_stat:.2f}\t'
                 f'{unmod_mu:.2f}\t{unmod_std:.2f}\t'
                 f'{mod_mu:.2f}\t{mod_std:.2f}\t'
@@ -399,11 +399,10 @@ def save_gmmtest_results(res, output_bed_fn):
             bed.write(bed_record)
 
 
-def save_sm_preds(sm_preds, cntrl_hdf5_fns, treat_hdf5_fns, output_json_fn):
+def save_sm_preds(sm_preds, hdf5_fns, output_json_fn):
     sm_preds_json = {
         'input_fns': {
-            'cntrl': dict(enumerate(cntrl_hdf5_fns)),
-            'treat': dict(enumerate(treat_hdf5_fns)),
+            i: dict(enumerate(h)) for i, h in enumerate(hdf5_fns)
         },
         'single_molecule_predictions': sm_preds
     }

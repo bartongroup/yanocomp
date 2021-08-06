@@ -162,7 +162,7 @@ def test_chunk(opts, gene_ids):
             )
             for pos, feature_id, kmers, cntrl, treat in pos_iter:
                 was_tested, result, sm = position_stats(
-                    cntrl, treat, kmers, opts,
+                    [cntrl, treat], kmers, opts,
                     random_state=random_state
                 )
                 if was_tested:
@@ -357,7 +357,7 @@ def gmm_test(opts):
     if opts.gmm and opts.generate_sm_preds:
         save_sm_preds(
             sm_preds,
-            opts.cntrl_hdf5_fns, opts.treat_hdf5_fns,
+            [opts.cntrl_hdf5_fns, opts.treat_hdf5_fns],
             opts.output_sm_preds_fn,
         )
 
