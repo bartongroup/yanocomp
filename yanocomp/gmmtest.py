@@ -11,7 +11,7 @@ import click
 
 from .opts import make_dataclass_decorator, dynamic_dataclass
 from .io import (
-    hdf5_list, get_shared_keys, load_model_priors,
+    hdf5_dict, intersection_reduce, get_shared_keys, load_model_priors,
     load_gene_kmers, load_gene_events, load_gene_attrs,
     save_gmmtest_results, save_sm_preds
 )
@@ -21,7 +21,7 @@ from .stats import GMMTestResults, position_stats, assign_modified_distribution
 logger = logging.getLogger('yanocomp')
 
 
-def get_valid_pos(events, min_read_depth):
+def get_dataset_valid_pos(events, min_read_depth):
     depth = (events.notnull()
                    .groupby('replicate', sort=False)
                    .sum())
@@ -40,11 +40,9 @@ def get_valid_windows(valid_pos, reverse, window_size=3):
             yield pos, win
 
 
-def get_cntrl_treat_valid_pos(cntrl_events, treat_events, reverse,
-                              min_read_depth=5, window_size=3):
-    cntrl_valid_pos = get_valid_pos(cntrl_events, min_read_depth)
-    treat_valid_pos = get_valid_pos(treat_events, min_read_depth)
-    valid_pos = cntrl_valid_pos.intersection(treat_valid_pos)
+def get_full_valid_pos(events, reverse, min_read_depth=5, window_size=3):
+    valid_pos = (get_dataset_valid_pos(e, min_read_depth) for e in events)
+    valid_pos = intersection_reduce(valid_pos)
     yield from get_valid_windows(valid_pos, reverse, window_size)  
 
 
@@ -54,55 +52,51 @@ def index_pos_range(events, win):
     return events
 
 
-def test_depth(cntrl_pos_events, treat_pos_events, min_read_depth=10):
-    cntrl_depth = cntrl_pos_events.groupby(level='replicate', sort=False).size()
-    treat_depth = treat_pos_events.groupby(level='replicate', sort=False).size()
-    return ((cntrl_depth >= min_read_depth).all() and 
-            (treat_depth >= min_read_depth).all())
+def test_depth(pos_events, min_read_depth=10):
+    depth = (
+        e.groupby(level='replicate', sort=False).size()
+        for e in pos_events
+    )
+    return all(
+        (e >= min_read_depth).all() for e in depth
+    )
 
 
-def create_positional_data(cntrl_events, treat_events, kmers, locus_id,
+def create_positional_data(events, kmers, locus_id,
                            reverse, min_read_depth=5, window_size=3):
     # first attempt to filter out any positions below the min_read_depth threshold
     # we still need to check again later, this just prevents costly indexing ops...
-    valid_pos = get_cntrl_treat_valid_pos(
-        cntrl_events, treat_events, reverse,
-        min_read_depth=min_read_depth,
-        window_size=window_size,
+    valid_pos = get_full_valid_pos(
+        events, reverse, min_read_depth=min_read_depth, window_size=window_size,
     )
     for pos, win in valid_pos:
-        cntrl_pos_events = index_pos_range(cntrl_events, win)
-        treat_pos_events = index_pos_range(treat_events, win)
-        if test_depth(cntrl_pos_events, treat_pos_events, min_read_depth):
+        pos_events = [index_pos_range(e, win) for e in events]
+        if test_depth(pos_events, min_read_depth):
             pos_kmers = kmers.loc[win].values
-            yield (pos, locus_id, pos_kmers, cntrl_pos_events, treat_pos_events)
+            yield (pos, locus_id, pos_kmers, pos_events)
 
 
-def iter_positions(gene_id, cntrl_datasets, treat_datasets, reverse,
+def iter_positions(gene_id, h5_datasets, conds, reverse,
                    test_level='gene', window_size=3, min_read_depth=5):
     '''
     Generator which iterates over the positions in a gene
     which have the minimum depth in eventaligned reads.
     '''
     by_transcript = test_level == 'transcript'
-    cntrl_events = load_gene_events(
-        gene_id, cntrl_datasets,
-        by_transcript_ids=by_transcript
-    )
-    treat_events = load_gene_events(
-        gene_id, treat_datasets,
-        by_transcript_ids=by_transcript
-    )
+    events = [
+        load_gene_events(gene_id, d, by_transcript_ids=by_transcript)
+        for d in h5_datasets.values()
+    ]
+
     kmers = load_gene_kmers(
-        gene_id, cntrl_datasets + treat_datasets
+        gene_id, h5_datasets
     )
     if by_transcript:
         # events are dicts of dataframes
-        valid_transcripts = set(cntrl_events).intersection(treat_events)
+        valid_transcripts = intersection_reduce(events)
         for transcript_id in valid_transcripts:
             yield from create_positional_data(
-                cntrl_events[transcript_id],
-                treat_events[transcript_id], 
+                [e[transcript_id] for e in events], 
                 kmers, transcript_id,
                 reverse,
                 min_read_depth=min_read_depth,
@@ -110,7 +104,7 @@ def iter_positions(gene_id, cntrl_datasets, treat_datasets, reverse,
             )
     else:
         yield from create_positional_data(
-            cntrl_events, treat_events, kmers,
+            events, kmers,
             gene_id, reverse,
             min_read_depth=min_read_depth,
             window_size=window_size
@@ -148,21 +142,20 @@ def test_chunk(opts, gene_ids):
     gene_ids, random_seed = gene_ids
     random_state = np.random.default_rng(random_seed)
 
-    with hdf5_list(opts.cntrl_hdf5_fns) as cntrl_h5, \
-         hdf5_list(opts.treat_hdf5_fns) as treat_h5:
+    with hdf5_dict(opts.conds, opts.hdf5_fns) as h5data:
 
         for gene_id in gene_ids:
-            chrom, strand = load_gene_attrs(gene_id, cntrl_h5)
+            chrom, strand = load_gene_attrs(gene_id, h5data)
             pos_iter = iter_positions(
-                gene_id, cntrl_h5, treat_h5,
+                gene_id, h5data, opts.conds,
                 reverse=True if strand == '-' else False,
                 test_level=opts.test_level,
                 window_size=opts.window_size,
                 min_read_depth=opts.min_read_depth
             )
-            for pos, feature_id, kmers, cntrl, treat in pos_iter:
+            for pos, feature_id, kmers, pos_data in pos_iter:
                 was_tested, result, sm = position_stats(
-                    [cntrl, treat], kmers, opts,
+                    pos_data, kmers, opts,
                     random_state=random_state
                 )
                 if was_tested:
@@ -188,10 +181,8 @@ def parallel_test(opts):
     ss = np.random.SeedSequence(opts.random_seed)
     random_seeds = list(ss.spawn(opts.processes))
 
-    with hdf5_list(opts.cntrl_hdf5_fns) as cntrl_h5, \
-         hdf5_list(opts.treat_hdf5_fns) as treat_h5:
-
-        gene_ids = sorted(get_shared_keys(cntrl_h5 + treat_h5))
+    with hdf5_dict(opts.conds, opts.hdf5_fns) as h5data:
+        gene_ids = sorted(get_shared_keys(h5data))
         gene_id_chunks = np.array_split(gene_ids, opts.processes)
 
     logger.info(
@@ -253,7 +244,9 @@ def set_default_depth(ctx, param, val):
 
 @dataclasses.dataclass
 class GMMTestOpts:
+    conds: list = dataclasses.field(init=False)
     generate_sm_preds: bool = dataclasses.field(init=False)
+    model: pd.DataFrame = dataclasses.field(init=False)
 
     def __post_init__(self):
         if self.random_seed is None:
@@ -261,18 +254,18 @@ class GMMTestOpts:
 
         self.generate_sm_preds = self.output_sm_preds_fn is not None
         self.model = load_model_priors(self.model_fn)
+        if isinstance(self.hdf5_fns[0], tuple):
+            self.hdf5_fns, self.conds = zip(*self.hdf5_fns)
 
 
-@click.command(options_metavar='''-c <cntrl_hdf5_1> \\
-                                  -c <cntrl_hdf5_2> \\
-                                  -t <treat_hdf5_1> \\
-                                  -t <treat_hdf5_2> \\
+@click.command(options_metavar='''-i <cntrl_hdf5_1> cntrl \\
+                                  -i <cntrl_hdf5_2> cntrl \\
+                                  -i <treat_hdf5_1> treat \\
+                                  -i <treat_hdf5_2> treat \\
                                   [OPTIONS]''',
               short_help='Differential RNA mod analysis')
-@click.option('-c', '--cntrl-hdf5-fns', required=True, multiple=True,
-              help='Control HDF5 files. Can specify multiple files using multiple -c flags')
-@click.option('-t', '--treat-hdf5-fns', required=True, multiple=True,
-              help='Treatment HDF5 files. Can specify multiple files using multiple -t flags')
+@click.option('-i', '--hdf5-fns', required=True, multiple=True, nargs=2,
+              help='HDF5 file and condition. Can specify multiple files using multiple -i flags')
 @click.option('-o', '--output-bed-fn', required=True, help='Output bed file name')
 @click.option('-s', '--output-sm-preds-fn', required=False, default=None,
               help='JSON file to output single molecule predictions. Can be gzipped (detected from name)')
@@ -326,8 +319,8 @@ def gmm_test(opts):
         mode = '3-comp GMM (uniform outliers)'
     logger.info(
         f'Running gmmtest in {mode} mode '
-        f'with {len(opts.cntrl_hdf5_fns):,} control '
-        f'datasets and {len(opts.treat_hdf5_fns):,} treatment datasets'
+        f'with {len(opts.hdf5_fns):,} '
+        f'datasets from {len(set(opts.conds)):,} conditions'
     )
     if not len(opts.test_gene):
         res, sm_preds = parallel_test(opts)
@@ -357,7 +350,7 @@ def gmm_test(opts):
     if opts.gmm and opts.generate_sm_preds:
         save_sm_preds(
             sm_preds,
-            [opts.cntrl_hdf5_fns, opts.treat_hdf5_fns],
+            opts.hdf5_fns, opts.conds,
             opts.output_sm_preds_fn,
         )
 

@@ -1,5 +1,6 @@
 import logging
 from collections import defaultdict
+import itertools as it
 import dataclasses
 
 import numpy as np
@@ -88,8 +89,8 @@ def multisamp_pca_kstest(event_tables, max_size, random_state):
             ks, pval = pca_kstest(cond_a, cond_b)
             _ks.append(ks)
             _pval.append(pval)
-        _, _pval = fdrcorrection(np.array(_pval))
-        i = np.argmax(_ks)
+        _pval = np.minimum(np.array(_pval) * len(_pval), 1) # bonferroni correction
+        i = np.argmin(_pval)
         ks, p_val = _ks[i], _pval[i]
     return ks, p_val
 
@@ -345,6 +346,12 @@ def g_test_with_homogeneity(preds, conds, p_val_threshold=0.05):
     homogeneity
     '''
     per_cond_counts = _groupby_sum(preds, conds)
+    unique_conds = np.unique(conds)
+    if len(unique_conds) == 2:
+        pairwise_comparisons = []
+    else:
+        pairwise_comparisons = list(it.combinations(unique_conds, r=2))
+        n_post_hoc = len(pairwise_comparisons)
     with np.errstate(invalid='raise'):
         try:
             het_g, p_val = _g_test(per_cond_counts[:, :N_COMPONENTS]) # do not include outliers
@@ -358,9 +365,22 @@ def g_test_with_homogeneity(preds, conds, p_val_threshold=0.05):
             hom_g += _g_test(preds[conds == c])[0]
         if hom_g >= het_g:
             p_val = 1
+            pairwise_gs = [np.nan for _ in pairwise_comparisons]
+            pairwise_p_vals = [1 for _ in pairwise_comparisons]
+        else:
+            pairwise_gs, pairwise_p_vals = [], []
+            for i, j in pairwise_comparisons:
+                p_g, p_p = _g_test(
+                    [per_cond_counts[i],
+                     per_cond_counts[j]]
+                )
+                pairwise_gs.append(p_g)
+                pairwise_p_vals.append(min(p_p * n_post_hoc, 1))
     else:
         hom_g = np.nan
-    return het_g, hom_g, p_val
+        pairwise_gs = [np.nan for _ in pairwise_comparisons]
+        pairwise_p_vals = [1 for _ in pairwise_comparisons]
+    return het_g, hom_g, p_val, pairwise_gs, pairwise_p_vals
 
 
 def calculate_fractional_stats(preds, conds, pseudocount=0.5, ci=95):
@@ -462,6 +482,8 @@ class GMMTestResults:
     frac_mod: np.ndarray = None
     g_stat: float = np.nan
     hom_g_stat: float = np.nan
+    pairwise_g_stats: np.ndarray = None
+    pairwise_p_vals: np.ndarray = None
     dist1_means: np.ndarray = None
     dist1_stds: np.ndarray = None
     dist2_means: np.ndarray = None
@@ -512,7 +534,8 @@ def position_stats(event_tables, kmers,
 
         r.dist1_means, r.dist2_means, r.dist1_stds, r.dist2_stds = model_params
  
-        r.g_stat, r.hom_g_stat, r.p_val = g_test_with_homogeneity(
+        (r.g_stat, r.hom_g_stat, r.p_val,
+         r.pairwise_g_stats, r.pairwise_p_vals) = g_test_with_homogeneity(
             preds, conds, p_val_threshold=opts.fdr_threshold
         )
 
@@ -527,7 +550,7 @@ def position_stats(event_tables, kmers,
             if opts.add_uniform:
                 prob, outlier = zip(*prob)
             else:
-                outlier = np.zeros_like(prob)
+                outlier = [np.zeros_like(p) for p in prob]
             sm_preds = {
                 'kmers': kmers.tolist(),
                 'model': format_model(gmm),

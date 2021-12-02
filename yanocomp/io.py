@@ -5,8 +5,10 @@ import gzip
 import csv
 import json
 import logging
+import itertools as it
 from contextlib import contextmanager
 from collections import defaultdict, OrderedDict
+from functools import reduce
 
 import numpy as np
 import pandas as pd
@@ -70,7 +72,8 @@ def parse_eventalign(eventalign_fn, summary_fn=None):
             )
         for record in ea_parser:
             parsed = {}
-            parsed['t_id'] = record['contig']
+            # replace / with _ or h5py will silently make subgroups
+            parsed['t_id'] = record['contig'].replace('/', '_')
             parsed['pos'] = int(record['position']) + 2
             parsed['kmer'] = record['reference_kmer']
             try:
@@ -244,16 +247,23 @@ def save_events_to_hdf5(collapsed, hdf5_fn):
 
 
 @contextmanager
-def hdf5_list(hdf5_fns):
-    '''Context manager for list of HDF5 files'''
-    hdf5_list = [
-        h5.File(fn, 'r') for fn in hdf5_fns
-    ]
+def hdf5_dict(conds, hdf5_fns):
+    '''Context manager for dict of HDF5 files'''
+    hdf5_dict = {}
+    for c, fn in zip(conds, hdf5_fns):
+        if c not in hdf5_dict:
+            hdf5_dict[c] = []
+        hdf5_dict[c].append(h5.File(fn, 'r'))
     try:
-        yield hdf5_list
+        yield hdf5_dict
     finally:
-        for f in hdf5_list:
-            f.close()
+        for fs in hdf5_dict.values():
+            for f in fs:
+                f.close()
+
+
+def intersection_reduce(sets):
+    return reduce(set.intersection, map(set, sets))
 
 
 def get_shared_keys(hdf5_handles):
@@ -261,10 +271,8 @@ def get_shared_keys(hdf5_handles):
     Identify the intersection of the keys in a list of hdf5 files
     '''
     # filter out any transcripts that are not expressed in all samples
-    genes = set(hdf5_handles[0].keys())
-    for d in hdf5_handles[1:]:
-        genes.intersection_update(set(d.keys()))
-    return list(genes)
+    genes = [intersection_reduce(cond_h5) for cond_h5 in hdf5_handles.values()]
+    return list(intersection_reduce(genes))
 
 
 def load_gene_kmers(gene_id, datasets):
@@ -273,7 +281,7 @@ def load_gene_kmers(gene_id, datasets):
     '''
     kmers = {}
     # positions (and their kmers) which are recorded may vary across datasets
-    for d in datasets:
+    for d in it.chain(*datasets.values()):
         k = d[f'{gene_id}/kmers'][:].astype(
             np.dtype([('pos', np.uint32), ('kmer', 'U5')])
         )
@@ -287,7 +295,8 @@ def load_gene_attrs(gene_id, datasets):
     for a gene from the HDF5 files...
     '''
     # get general info which should be same for all datasets
-    g = datasets[0][gene_id]
+    k = list(datasets)[0]
+    g = datasets[k][0][gene_id]
     chrom = g.attrs['chrom']
     strand = g.attrs['strand']
     return chrom, strand
@@ -373,8 +382,9 @@ def save_gmmtest_results(res, output_bed_fn):
             (chrom, pos, gene_id, strand, kmer,
              kmers, centre,
              log_odds, lb, ub,
-             pval, fdr, fm,
+             pval, fdr, frac_mod,
              g_stat, hom_g_stat,
+             pairwise_g, pairwise_p,
              unmod_mus, unmod_stds, mod_mus, mod_stds,
              ks) = record
             try:
@@ -385,24 +395,30 @@ def save_gmmtest_results(res, output_bed_fn):
                 unmod_mu, unmod_std, mod_mu, mod_std = np.nan, np.nan, np.nan, np.nan
             with np.errstate(divide='ignore'):
                 score = int(round(min(- np.log10(fdr), 100)))
-            fm = ','.join([f'{f:.2f}' for f in fm])
+            frac_mod = ','.join([f'{f:.3f}' for f in frac_mod])
+            if len(pairwise_g):
+                pairwise_g = ','.join([f'{g:.3f}' for g in pairwise_g])
+                pairwise_p = ','.join([f'{p:.3g}' for p in pairwise_p])
+            else:
+                pairwise_g, pairwise_p = 'nan', 'nan'
             bed_record = (
                 f'{chrom:s}\t{pos - 2:d}\t{pos + 3:d}\t'
                 f'{gene_id}:{kmer}\t{score:d}\t{strand:s}\t'
-                f'{log_odds:.2f}[{lb:.2f},{ub:.2f}]\t'
-                f'{pval:.2g}\t{fdr:.2g}\t{fm:s}\t'
-                f'{g_stat:.2f}\t{hom_g_stat:.2f}\t'
-                f'{unmod_mu:.2f}\t{unmod_std:.2f}\t'
-                f'{mod_mu:.2f}\t{mod_std:.2f}\t'
-                f'{ks:.2f}\n'
+                f'{log_odds:.3f}[{lb:.3f},{ub:.3f}]\t'
+                f'{pval:.3g}\t{fdr:.3g}\t{frac_mod:s}\t'
+                f'{g_stat:.3f}\t{hom_g_stat:.3f}\t'
+                f'{pairwise_g:s}\t{pairwise_p:s}\t'
+                f'{unmod_mu:.3f}\t{unmod_std:.3f}\t'
+                f'{mod_mu:.3f}\t{mod_std:.3f}\t'
+                f'{ks:.3f}\n'
             )
             bed.write(bed_record)
 
 
-def save_sm_preds(sm_preds, hdf5_fns, output_json_fn):
+def save_sm_preds(sm_preds, hdf5_fns, conds, output_json_fn):
     sm_preds_json = {
         'input_fns': {
-            i: dict(enumerate(h)) for i, h in enumerate(hdf5_fns)
+            c: dict(enumerate(h)) for c, h in zip(conds, hdf5_fns)
         },
         'single_molecule_predictions': sm_preds
     }
