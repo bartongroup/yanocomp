@@ -212,6 +212,12 @@ def parallel_test(opts):
     res.dropna(subset=['p_val'], inplace=True) # TODO not sure how some nans creep in
     if len(res):
         _, res['fdr'], _, _ = multipletests(res.p_val, method='fdr_bh')
+        pairwise_p_vals = zip(*res.pairwise_p_vals)
+        pairwise_fdrs = []
+        for pw_p_val in pairwise_p_vals:
+            _, pw_fdr, _, _ = multipletests(pw_p_val, method='fdr_bh')
+            pairwise_fdrs.append(pw_fdr)
+        res['pairwise_p_vals'] = list(zip(*pairwise_fdrs))
     return res, sm_preds
 
 

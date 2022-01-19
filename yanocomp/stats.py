@@ -375,7 +375,7 @@ def g_test_with_homogeneity(preds, conds, p_val_threshold=0.05):
                      per_cond_counts[j]]
                 )
                 pairwise_gs.append(p_g)
-                pairwise_p_vals.append(min(p_p * n_post_hoc, 1))
+                pairwise_p_vals.append(p_p) # uncorrected pairwise p vals to be controlled later
     else:
         hom_g = np.nan
         pairwise_gs = [np.nan for _ in pairwise_comparisons]
