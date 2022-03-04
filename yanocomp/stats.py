@@ -347,11 +347,7 @@ def g_test_with_homogeneity(preds, conds, p_val_threshold=0.05):
     '''
     per_cond_counts = _groupby_sum(preds, conds)
     unique_conds = np.unique(conds)
-    if len(unique_conds) == 2:
-        pairwise_comparisons = []
-    else:
-        pairwise_comparisons = list(it.combinations(unique_conds, r=2))
-        n_post_hoc = len(pairwise_comparisons)
+    pairwise_comparisons = list(it.combinations(unique_conds, r=2))
     with np.errstate(invalid='raise'):
         try:
             het_g, p_val = _g_test(per_cond_counts[:, :N_COMPONENTS]) # do not include outliers
